@@ -1,0 +1,74 @@
+
+model{
+  for(i in 1:n){
+    for (k in 1:K){
+      s1[i,k] = se[k,sid[n]]^x[i,k]*((1-se[k,sid[n]])^(1-x[i,k])) # probability of testing positive if Vc present
+      s2[i,k] = sp[k,sid[n]]^(1-x[i,k])*((1-sp[k,sid[n]])^x[i,k]) # probability of testing positive if Vc absent
+    }
+
+    # joint probabilities of all K test results by subject i
+    for (j in 1:K) {
+      for (h in 1:K) {
+        cop[i,j,h] = c1[sid[n],j,h]*(-1)^(x[i,j] + x[i,h])/(s1[i,j]*s1[i,h]) # if Vc present
+        con[i,j,h] = c2[sid[n],j,h]*(-1)^(x[i,j] + x[i,h])/(s2[i,j]*s2[i,h]) # if Vc absent
+      }
+    }
+
+    # likelihood of observing a positive result
+    eta[i] = (prod(s1[i,1:K])*(1+sum(cop[i,,])))
+    theta[i] = (prod(s2[i,1:K])*(1+sum(con[i,,])))
+    prob[i] = pi[sid[n]]*eta[i]+(1-pi[sid[n]])*theta[i]
+
+    z[i] ~ dpois(-log(prob[i])) # 'Poisson zero trick'
+  }
+
+  # uniform priors with constraints for the covariances
+  for (s in 1:S) {
+    for (l in 1:(K-1)) {
+      for (h in (l+1):K) {
+        c1[s,l,h] ~ dunif((se[l,s]-1)*(1-se[h,s]), (min(se[l,s],se[h,s])-se[l,s]*se[h,s]))
+        c2[s,l,h] ~ dunif((sp[l,s]-1)*(1-sp[h,s]), (min(sp[l,s],sp[h,s])-sp[l,s]*sp[h,s])) 
+      }
+    }
+  }
+  
+  for (s in 1:S) {
+    for (h in 1:K){
+      for (l in h:K){
+        c1[s,l,h] = 0
+        c2[s,l,h] = 0 
+      }
+    }
+  }
+  
+  # mean sensitivity and specificity
+  for (k in 1:K){
+    for (s in 1:S) {
+      se[k,s] = ilogit(logit_se[k,s])
+      sp[k,s] = ilogit(logit_sp[k,s])
+      logit_se[k,s] ~ dnorm(mu_logit_se[k], sigma_logit_se[k])
+      logit_sp[k,s] ~ dnorm(mu_logit_sp[k], sigma_logit_sp[k])
+    }
+  }
+  
+  # prior on Vc prevalence by study
+  for (s in 1:S) {
+    pi[s] ~ dbeta(1,1)
+  }
+  
+  # priors for pooling sensitivity and specificity
+  mu_sp[1] ~ dbeta(1,1)T(0.8,1)
+  mu_sp[2] ~ dbeta(1,1)T(0.8,1)
+  mu_sp[3] ~ dbeta(1,1)T(0.5,1)
+
+  mu_se[1] ~ dbeta(1,1)T(0.3,1)
+  mu_se[2] ~ dbeta(1,1)T(0.5,1)
+  mu_se[3] ~ dbeta(1,1)T(0.5,1)
+
+  for (k in 1:K) {
+    mu_logit_se[k] = logit(mu_se[k])
+    mu_logit_sp[k] = logit(mu_sp[k])
+    sigma_logit_se[k] ~ dnorm(0,1)T(0,)
+    sigma_logit_sp[k] ~ dnorm(0,1)T(0,)
+  } 
+}

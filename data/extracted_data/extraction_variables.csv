@@ -1,0 +1,71 @@
+Group,Variable label,Variable,Type,Description
+Study information,Study ID,study_id,number,Unique identifier for source study
+,Title,study_title,text (free form),Title of the paper or study
+,Citation,citation,hyperlink or citation,Link to the study or a citation
+,Study design,study_design,text (select option),Options include: Vaccine effectiveness; Surveillance; Diagnostic test accuracy; Other (please describe in notes)
+,Surveillance type,surveillance_type,text (select option),"If applicable, enter the type of the surveillance, whether this is ""routine surveillance"" or ""outbreak surveillance"" (surveillance that gets initiated in reponse to a recent outbreak)"
+,Case definition,case_definition,text (free form),Case definition used to diagnose suspected cholera cases (reference for WHO definitions: https://www.gtfcc.org/wp-content/uploads/2021/04/6th-meeting-of-the-gtfcc-working-group-on-surveillance-webinars-2021-session-1-azman-thomson-wendland.pdf)
+,Cases minimum age,cases_min_age,number,"Number indicating minimum age permitted in the study (not necessarily the minimum age of actual participants), 0 if listed as all ages or if no age criteria was specified"
+,All cases dehydrated,cases_dehydrated,0/1,Case definition includes dehydration for all cases
+,All cases hospitalized,cases_hospitalized,0/1,"Cases were selected among only hospitalized patients (writted as ""hospitalized"", ""admitted to/at/in hospital X"" only if clear that stay is 1+ nights, or ""in-patient"")"
+,Sampling approach,sampling_approach,text (select option),"How were the suspected cholera cases selected for testing? Options include: All suspected cases, Simple random, Systematic, Stratified, Clustered, Convenience, Unknown, Other (detail in sampling description)"
+,Sampling description,sampling_description,text (free form),Include specific details from the text about how samples were selected for testing (can copy and paste the text directly)
+,Proportion lab tested,prop_lab_tested,number,"Proportion of suspected cases that were tested for confirmation by culture or RDT; if this is not reported write ""unknown"""
+,Microdata available,microdata,0/1,1 - individual-level data is available (either publicly or it has already been shared with us); 0 - data is currently only available in aggregate
+,Number of lab tests,num_tests,number,"Number of diagnostic tests used (should be 1, 2, or 3)"
+,Outbreak start,outbreak_L,date,"If applicable, date that the outbreak started; if month is provided without day, set day to 1"
+,Outbreak end,outbreak_R,date,"If applicable, date that the outbreak ended; if month is provided without day, set to last day of month"
+,Outbreak description,outbreak_description,text (free form),"Enter brief information of the recent outbreak or the outbreak related to the surveillance of the study, including the case number, CFR, or other information if there are any."
+,Reported incidence,reported_inc,number,"If the paper reported incidence estimation (n_suspected/pop) of the study period, then enter here; if case number and population data are both available, then calculate inc and enter here. The unit is number of suspected case per 10,000."
+,Reported CFR,reported_cfr,number,"If the paper reported CFR estimation (n_death/n_suspected) of the study period, then enter here; if case number and population data are both available, then calculate CFR and enter here. The unit is n_death per 100 suspected cases. (%)"
+,Monsoon information,monsoon_info,text (free form),"Enter brief information about the monsoon information, or rainy season information of the study areas if there are any."
+,Population information,pop_info,text (free form),"Enter population size estimation of the study area or concerned population, or census data if there any any. "
+,Cholera situation,cholera_situation,text (select option),"Whether cholera is endemic or epidemic in the study area. Select among ""Endemic"", ""Epidemic"", or ""Unknown""."
+,Notes,notes,text (free form),Important notes about the study that aren't included in the other data extraction fields
+Aggregate data,Entry ID,entry_id,unique entry/group id,"Unique identifier for grouped entries within the study; for example, a separate entry for each diagnostic test, age group, etc."
+,Entry description,entry_description,text,"Name or description of group (may be redundant with age group below, but allows for flexibility if, for example, data are reported by vaccine status)"
+,Sample type,sample_type,text (select option),Options include: stool; rectal swab
+,Diagnostic test type,diagnostic_test_type,text (select option),"Options include: culture, PCR, RDT"
+,Diagnostic test name,diagnostic_test_name,text (free form),"Name of the specific diagnostic test used, if given"
+,Number of cases tested,n_cases_tested,number,Number of suspected cases tested
+,Number of cases positive,n_cases_positive,number,Number of suspected cases that test positive by the given test
+,Country ISO3 code,country_iso3,country iso3 code,ISO3 country code (https://unstats.un.org/unsd/tradekb/knowledgebase/country-code) for the location(s) that the study was conducted in; results for multiple countries within a single study_id should be listed in separate entry_ids
+,GADM Admin 0,admin0,text,Country name corresponding to GADM shapefiles
+,GADM Admin 1,admin1,text,First administrative division as listed in GADM shapefiles
+,GADM Admin 2,admin2,text,Second administrative division as listed in GADM shapefiles
+,GADM Admin 3,admin3,text,"Third administrative division as listed in GADM shapefiles (if need to use a lower division e.g, admin 4 or 5 please add columns)"
+,Precise place name,place_name,text,"If the location cannot be matched to an admin level, leave those blank (or just add the highest division possible) and then add the precise location name here"
+,Location name,location,text (free form),Precise place name or clinic of sampling location(s); please be as specific as possible
+,Facility description,facility_description,text (free form),"Description of the sampling clinic, reference lab, etc where the testing was done"
+,Facility type,facility_type,test (select option),"Options: CTC (includes cholera treatment and diarrhea hospitals), general hospital (treats non-diarrhea patients), multi-site (includes studies that pool data from multiple centers, which may include both CTC and general hospitals; if it's clear that the data includes only CTC or only general hospitals use those designations instead), or other (e.g., active surveillance)"
+,Date start,TL,date,"Date that the study/enrollment started; if month is provided without day, set day to 1"
+,Date end,TR,date,"Date that the study/enrollment ended; if month is provided without day, set to last day of month"
+,Age lower,age_L,number,Lower bound of age group in years (round months to 2 decimal places if provided)
+,Age upper,age_R,number,Upper bound of age group (round months to 2 decimal places if provided)
+"Additional details, if applicable",Median age,median_age,number,"median age, if reported"
+,Mean age,mean_age,number,"mean age, if reported"
+,Proportion under 5,prop_5,number,"proportion of sample under 5 years of age, if reported"
+,Proportion under 15,prop_15,number,"proportion of sample under 15 years of age, if reported"
+,Proportion female,prop_female,number,proportion of group that is female
+,Proportion vaccinated,prop_vaccinated,number,"proportion that were vaccinated, if reported"
+,Proportion on antibiotics,prop_antibiotics,number ,"proportion that received antibiotics in the two weeks prior to enrollment, if reported"
+,Prop severely dehydrated,prop_severe_dehyd,number,"proportion that were severely dehydrated (as defined in the study), if reported"
+,Prop moderately dehydrated,prop_mod_dehyd,number,"proportion that were moderately dehydrated (as defined in the study), if reported"
+,Test entries overlap,entries_overlap,1/0,"Flag for data that had to be entered in duplicate (for example, each test result is stratified by either age or time period but not both)"
+,Overlapping study,study_overlap,number,"Add study number where the sample overlaps with the sample in this study (but different information is provided by each study, so we want to extract both); include description of overlap in the comments"
+,Comments,comments,text (free form),"Any additional comments pertaining to the data entry, including any additional stratifications available in the study, and whether additional incidence or outbreak information is available"
+Extractor,Extractor initials,extractor,text,Initials of the person who performed the extraction
+Datasets,Primary dataset,primary,1/0,Whether or not to include in the main dataset used to estimate percent positive. Criteria detailed here: https://docs.google.com/document/d/1yZDBO5omkPESaFjlgzaribjpRvje2K5GglKyFe6XD5Q/edit?usp=sharing
+,Stratified phase or month,strat_phase,1/0,Flag for data stratified by month or phase/wave of the epidemic (regardless of inclusion in primary dataset)
+,Stratified year,strat_year,1/0,Flag for data stratified by year (regardless of inclusion in primary dataset)
+,Stratified test,strat_test,1/0,Flag for data stratified by diagnostic test (regardless of inclusion in primary dataset)
+,Stratified location,strat_loc,1/0,Flag for data stratified by sub-national location (regardless of inclusion in primary dataset)
+,Stratified age,strat_age,1/0,Flag for data stratified by any age group (regardless of inclusion in primary dataset)
+,Stratified sex,strat_sex,1/0,Flag for data stratified by male/female (regardless of inclusion in primary dataset)
+,Stratified antibiotics,strat_ab,1/0,Flag for data stratified by treatment with antibiotics (regardless of inclusion in primary dataset)
+,Stratified dehydration,strat_dehyd,1/0,Flag for data stratified by dehydration status or need for IV fluids (regardless of inclusion in primary dataset)
+Checks,Overlaps checked,check_overlap,1,Overlaps between study_ids and entry_ids checked
+,Overlap decision,decision,text (free form),"If a decision had to be made between overlapping dataset, what the decision was and why. If no decision was needed, N/A"
+,Check stratifications,check_strata,1,"Check whether all the possible stratifications of the study have been extracted. If checked and all have been extracted, enter 1."
+,Check data,check_data,1,"Check whether the number of tested samples and number of the positive samples are entered correctly. If checked and all correct, enter 1."
+,Check sampling approach,check_sampling,1,"Check and correct the sampling strategy column, if checked and corrected, enter 1."

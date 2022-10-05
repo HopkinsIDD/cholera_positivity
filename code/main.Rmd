@@ -1,0 +1,1067 @@
+---
+title: "Towards estimating true cholera burden: a systematic review and meta-analysis of Vibrio cholerae positivity"
+author: "Kirsten E. Wiens, Hanmeng Xu, Kaiyue Zou, John Mwaba, Justin Lessler, Espoir B. Malembaka, Maya N. Demby, Godfrey Bwire, Firdausi Qadri, Elizabeth C. Lee, Andrew S. Azman"
+output: 
+  html_document:
+    toc: true
+    toc_float: true
+---
+
+
+<br>
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE, warning = FALSE, message = FALSE,
+                      dev=c('png', 'pdf'), fig.path='figures/')
+knitr::opts_knit$set(root.dir = here::here())
+```
+
+```{r preamble, warning = TRUE, message = FALSE}
+# packages
+pacman::p_load('tidyverse', 'data.table', 'readxl',
+               'stringr', 'lubridate', 'reshape2',
+               'boot', 'RVAideMemoire', 'meta', 
+               'sf', 'raster', 'countrycode',
+               'ggplot2', 'RColorBrewer', 'cowplot',
+               'kableExtra', 'flextable')
+
+# custom functions
+source(here::here('code', 'utils.R'))
+
+# JAGS settings
+jags_run_id <- 'jags-cd'
+
+# Stan settings
+se_sp_draws <- 1000 # number of draws of sens/spec to use from the JAGS model output
+
+# set random seed
+set.seed(7341)
+```
+
+```{r load-clean-data, include = FALSE}
+# shapefile
+shp <- st_read(here::here('data/shapefiles/ne_50m_admin_0_countries/ne_50m_admin_0_countries.shp'))
+shp <- shp %>% dplyr::select(ISO_A3, NAME_SORT, geometry)
+
+#  load data
+df_all <- read.csv(here::here('data', 'extracted_data', 'cc_extractions.csv'))
+vars <- read.csv(here::here('data', 'extracted_data', 'extraction_variables.csv'))
+
+# set column variable names
+names(df_all) <- gsub('\\.', ' ', names(df_all))
+df_all <- relocate(df_all, vars$Variable.label)
+names(df_all) <- vars$Variable
+df_all <- df_all[!is.na(names(df_all))]
+
+# format columns
+df_all <- df_all %>%
+  # primary dataset
+  filter(primary==1) %>%
+  # dates
+  mutate(outbreak_L = as.Date(outbreak_L, format = c('%d-%B-%Y')),
+         outbreak_R = as.Date(outbreak_R, format = c('%d-%B-%Y')),
+         TL = as.Date(TL, format = c('%d-%B-%Y')),
+         TR = as.Date(TR, format = c('%d-%B-%Y'))) %>%
+  # remove variable name text in parentheses and set factor levels
+  mutate(study_design = gsub('\\s*\\([^\\)]+\\)', '', study_design),
+         sampling_approach = gsub('\\s*\\([^\\)]+\\)', '', sampling_approach),
+         study_design = factor(study_design, 
+                               levels = c('Diagnostic test accuracy',
+                                          'Vaccine effectiveness',
+                                          'Surveillance', 'Other')),
+         sampling_approach = factor(sampling_approach, 
+                                    levels = c('All suspected cases', 'Systematic',
+                                               'Simple random', 'Other', 
+                                               'Convenience', 'Unknown')),
+         sampling_quality = ifelse(sampling_approach %in% c('All suspected cases', 
+                                                            'Systematic',
+                                                            'Simple random'),
+                                      'High', 'Low'),
+         cases_dehydrated = ifelse(cases_dehydrated == 1, 'Yes', 'No')) %>%
+  # region as defined by World Bank Development Indicators
+  mutate(region = countrycode(country_iso3, 
+                              origin = 'iso3c', 
+                              destination = 'region')) %>%
+  mutate(region = ifelse(region != 'Sub-Saharan Africa',
+                         region, 
+                         countrycode(country_iso3, 
+                                     origin = 'iso3c', 
+                                     destination = 'region23'))) %>%
+  # surveillance is outbreak or non-outbreak
+  mutate(surveillance_type = ifelse(surveillance_type == 'Outbreak surveillance',
+                                    'Outbreak', 'Non-outbreak')) %>%
+  # categorical version of age variable
+  mutate(cases_min_age_categ = paste0('age', cases_min_age)) %>%
+  # remove incomplete extractions
+  filter(!is.na(sampling_approach))
+
+# admin name editing (to match the shapefiles)
+df_all <- edit_admin_names(df_all)
+```
+
+```{r match-polygons}
+# match each entry_id to a polygon
+shp_list <- readRDS(here::here("data", "shapefiles", "shp_list.RData"))
+# shp_list contains three shapefiles (shp_admin0, shp_admin1, shp_admin2), e.g. if the minimal admin level of an entry is 0 (country level), the shapefile can be found in shp_admin0. If an entry contains more than one place, the were separated into different rows, each has its own polygon.
+```
+
+```{r load-incidence}
+# load calculated estimated incidence (based on raster) from folder, the raster we have only covers sub-saharan Africa, other places were marked as NA
+df_all <- suppressMessages(load_incidence(df_all))
+```
+
+```{r aggregate-stratifications}
+# variables to keep
+keep_vars <- c('study_id', 'study_design', 'surveillance_type', 'case_definition', 'cases_min_age', 'cases_dehydrated', 'cases_hospitalized', 'sampling_quality', 'sampling_description', 'prop_lab_tested', 'num_tests', 'cholera_situation', 'diagnostic_test_type', 'diagnostic_test_name', 'region', 'country_iso3', 'admin0')
+
+# aggregate stratifications by taking weighted mean
+# this will be our main analysis dataset
+df <- df_all %>%
+  group_by_at(keep_vars) %>%
+  summarize(prop_5 = weighted.mean(prop_5, n_cases_tested, na.rm=T),
+            prop_15 = weighted.mean(prop_15, n_cases_tested, na.rm=T),
+            prop_female = weighted.mean(prop_female, n_cases_tested, na.rm=T),
+            prop_vaccinated = weighted.mean(prop_vaccinated, n_cases_tested, na.rm=T),
+            prop_antibiotics = weighted.mean(prop_antibiotics, n_cases_tested, na.rm=T),
+            prop_severe_dehyd = weighted.mean(prop_severe_dehyd, n_cases_tested, na.rm=T),
+            prop_mod_dehyd = weighted.mean(prop_mod_dehyd, n_cases_tested, na.rm=T),
+            n_cases_tested = sum(n_cases_tested, na.rm = TRUE),
+            n_cases_positive = sum(n_cases_positive, na.rm = TRUE)) %>%
+  ungroup()
+```
+
+<br>
+
+## Study characteristics
+
+### Figure S1. Data coverage by geography 
+
+Number of study-periods in the primary dataset at each administrative level by country. An individual study has >1 "study-periods" if it reports cholera positivity for >1 time frame. Countries with >10 study-periods displayed as 10.
+
+```{r figS1, fig.height = 10, fig.width = 7}
+lt <- df_all %>% 
+  # subset to primary dataset
+  filter(primary==1) %>%
+  # select relevant study-period columns
+  dplyr::select(study_id, TL, TR, country_iso3, 
+         admin0, admin1, admin2, admin3, place_name) %>%
+  unique() %>%
+  # only keep location names for lowest admin level
+  mutate(admin0 = ifelse(admin1 == '' & admin2 == '' & admin3 == '', admin0, ''),
+         admin1 = ifelse(admin2 == '' & admin3 == '', admin1, ''),
+         admin2 = ifelse( admin3 == '', admin2, '')) %>%
+  # reshape for counting
+  reshape2::melt(measure.vars = c('admin0', 'admin1', 'admin2', 'admin3'),
+                 id.vars = c('country_iso3')) %>%
+  group_by(country_iso3, variable) %>%
+  # count study-periods by admin level
+  summarize(location_periods = sum(value!='')) %>%
+  ungroup()
+
+# plot for each admin level
+figS1 <- list()
+for (i in 0:3) {
+  figS1[[i+1]] <- data_map(lt, shp, ad = paste0('admin', i))
+}
+
+cowplot::plot_grid(figS1[[1]], figS1[[2]], figS1[[3]], figS1[[4]],
+                   labels = c('A', 'B', 'C', 'D'),
+                   ncol = 1)
+
+
+# # number at each level
+# lt %>%
+#   group_by(variable) %>%
+#   # count study-periods by admin level
+#   summarize(location_periods = sum(location_periods)) %>%
+#   ungroup() %>%
+#   pretty_table()
+
+# # numbers for Haiti
+# lt %>%
+#   filter(country_iso3 == 'HTI') %>%
+#   group_by(variable) %>%
+#   # count study-periods by admin level
+#   summarize(location_periods = sum(location_periods)) %>%
+#   ungroup() %>%
+#   pretty_table()
+```
+
+<br>
+
+### Figure S2. Data coverage over time
+
+Number of study-location-periods in the primary dataset at each administrative level by country within different time periods. An individual study has >1 "study-location-periods" if it reports cholera positivity for >1 time frame and/or for >1 administrative level. Countries with >10 study-location-periods displayed as 10. Year represents the year sampling was completed. Excludes 8 studies missing a study end date.
+
+```{r figS2, fig.height = 10, fig.width = 7}
+# similar to those above, but instead of stratification by admin level, stratify into 4 time periods (before 2000~2004, 2005~2009, 2010~2014, after 2015)
+coverage_time <- df_all %>%
+  filter(primary==1) %>%
+  # select relevant study-period columns
+  dplyr::select(study_id, TL, TR, country_iso3) %>%
+  unique() %>%
+  mutate(time_period = case_when(TR <= as.Date("2004-12-31") ~ "1997~2004",
+                                 TR > as.Date("2004-12-31") & TR <= as.Date("2009-12-31") ~ "2005~2009",
+                                 TR > as.Date("2009-12-31") & TR <= as.Date("2014-12-31") ~ "2010~2014",
+                                 TR > as.Date("2014-12-31") ~ "2015~2019")) %>%
+  # count by time (study ending time)
+  count(country_iso3, time_period) %>% rename(variable = time_period, location_periods = n) %>%
+  ungroup()
+
+# plot for each time period
+figS2 <- list()
+for (i in c("1997~2004", "2005~2009", "2010~2014", "2015~2019")) {
+  figS2[[i]] <- data_map(coverage_time, shp, ad = i)
+}
+
+cowplot::plot_grid(figS2[[1]], figS2[[2]], figS2[[3]], figS2[[4]],
+                   labels = c('A', 'B', 'C', 'D'),
+                   ncol = 1)
+
+# # number at each level
+# coverage_time %>%
+#   group_by(variable) %>%
+#   # count study-periods by admin level
+#   summarize(location_periods = sum(location_periods)) %>%
+#   ungroup() %>%
+#   pretty_table()
+
+# # numbers for Haiti
+# coverage_time %>%
+#   filter(country_iso3 == 'HTI') %>%
+#   group_by(variable) %>%
+#   # count study-periods by admin level
+#   summarize(location_periods = sum(location_periods)) %>%
+#   ungroup() %>%
+#   pretty_table()
+```
+
+<br>
+
+### Table 1. Study characteristics
+
+Number of study-observations included in the dataset with each study characteristic. An individual study has >1 study-observations if it reports V. cholerae positivity for >1 sampling method or country.
+
+```{r tab1}
+# prep variables for table
+sd <- df %>% 
+  # format proportion tested
+  mutate(prop_lab_tested = ifelse(prop_lab_tested < 0.05, '0-5',
+                                   ifelse(prop_lab_tested >=0.05 & prop_lab_tested < 0.5, '5-50',
+                                          ifelse(prop_lab_tested >= 0.5 & prop_lab_tested < 0.95, '50-95', '95+')))) %>%
+  # number of tests
+  mutate(num_tests = ifelse(num_tests >= 3, '3+', num_tests)) %>%
+  # format sample sizes
+  group_by(study_id, study_design, sampling_quality, prop_lab_tested, num_tests) %>%
+  summarize(n = sum(n_cases_tested)) %>%
+  ungroup() %>%
+  mutate(n = ifelse(n < 10, '1-9', 
+                    ifelse(n >=10 & n < 100, '10-99',
+                           ifelse(n >= 100 & n < 1000, '100-999', '1000+')))) %>%
+  unique() %>%
+  dplyr::select(-study_id) 
+
+# summarize and make table
+sd %>%
+  summarize_cats() %>%
+  pretty_table()
+
+sd %>%
+  summarize_cats() %>%
+  flextable() %>%
+  save_as_docx(path = here::here('code/tables/table1.docx'))
+```
+
+<br>
+
+### Table S2. Characteristics of suspected cholera cases reported by each study
+
+```{r tabS2}
+# summarize studies with and without covariates
+cv <- df %>% 
+  dplyr::select(study_id, prop_5, prop_15, prop_female, prop_mod_dehyd,
+                prop_vaccinated, prop_antibiotics, prop_severe_dehyd) %>%
+  mutate(prop_5_and_severe_dehyd = ifelse(!is.na(prop_5+prop_severe_dehyd), 'Yes', 'No'),
+         prop_5_and_dehyd_and_antibiotics = ifelse(!is.na(prop_5+prop_severe_dehyd+prop_antibiotics), 'Yes', 'No')) %>%
+  mutate(prop_under_5 = ifelse(!is.na(prop_5), 'Yes', 'No'),
+         prop_under_15 = ifelse(!is.na(prop_15), 'Yes', 'No'),
+         prop_female = ifelse(!is.na(prop_female), 'Yes', 'No'),
+         prop_vaccinated = ifelse(!is.na(prop_vaccinated), 'Yes', 'No'),
+         prop_antibiotics = ifelse(!is.na(prop_antibiotics), 'Yes', 'No'),
+         prop_mod_dehyd = ifelse(!is.na(prop_mod_dehyd), 'Yes', 'No'),
+         prop_severe_dehyd = ifelse(!is.na(prop_severe_dehyd), 'Yes', 'No')) %>%
+  unique() %>%
+  dplyr::select(-study_id, -prop_5, -prop_15)
+
+# summarize and make table
+cv %>%
+  summarize_cats() %>%
+  pretty_table()
+
+cv %>%
+  summarize_cats() %>%
+  flextable() %>%
+  save_as_docx(path = here::here('code/tables/tableS2.docx'))
+```
+
+<br>
+
+## *V. cholerae* positivity in unadjusted data
+
+### Figure 2. *Vibrio cholerae* positivity by study methodology and outbreak context
+
+Proportion of suspected cholera cases that were confirmed positive by **A)** diagnostic test type, **B)** quality of sampling methods, where "high" includes all suspected cases or a random or stratified sample and "low" includes convenience or unreported sampling methods, **C)** age minimum in suspected case definition, where "0" indicates that no minimum age was set, and **D)** whether surveillance was initiated in response to an outbreak or whether it was routine surveillance or non-outbreak. Each point is a study-observation; individual studies may have multiple points if they reported positivity by multiple tests, reported results for multiple countries or outbreak contexts, and/or multiple sampling methods. Circles represent study-observations with high quality sampling and triangles indicate low quality sampling.
+
+```{r}
+cp <- df %>%
+  # select cols
+  group_by(study_id, study_design, sampling_quality,
+           cases_min_age, cases_dehydrated, cases_hospitalized,
+           surveillance_type, cholera_situation, 
+           prop_antibiotics, prop_severe_dehyd,
+           country_iso3, diagnostic_test_type) %>%
+  # percent positive
+  mutate(prop_pos = n_cases_positive/n_cases_tested,
+         sampling_quality = ifelse(sampling_quality == 'High', 'High quality', 'Low quality')) %>%
+  # hospitalized OR dehydrated
+  mutate(cases_hosp_dehyd = ifelse(cases_hospitalized == 1 | cases_dehydrated == 1, 1, 0)) 
+```
+
+```{r}
+# proportion positive by diagnostic test
+f2a <- plot_posrate(cp, 'diagnostic_test_type', num_colors=3)
+
+# cp %>% 
+#   group_by(diagnostic_test_type) %>%
+#   summarize(median = median(prop_pos)) %>%
+#   ungroup %>%
+#   pretty_table()
+
+# proportion positive by sampling method
+f2b <- plot_posrate(cp, 'sampling_quality', num_colors=3)
+
+# cp %>% 
+#   group_by(sampling_quality) %>%
+#   summarize(median = median(prop_pos)) %>%
+#   ungroup %>%
+#   pretty_table()
+```
+
+```{r}
+# proportion positive by case definitions
+f2c <- plot_posrate(cp, 'cases_min_age', num_colors=5) + 
+  ggtitle('Age minimum in case definition')
+
+# cp %>% 
+#   group_by(cases_min_age) %>%
+#   summarize(median = median(prop_pos)) %>%
+#   ungroup %>%
+#   pretty_table()
+```
+
+```{r}
+# proportion positive by surveillance type
+f2d <- plot_posrate(cp, 'surveillance_type', num_colors=3)
+
+# cp %>% 
+#   group_by(surveillance_type) %>%
+#   summarize(median = median(prop_pos)) %>%
+#   ungroup %>%
+#   pretty_table()
+```
+
+```{r fig2, fig.width = 8, fig.height = 6}
+cowplot::plot_grid(f2a, f2b, f2c, f2d,
+                   labels = c('A', 'B', 'C', 'D'),
+                   nrow = 2)
+```
+
+
+<br>
+
+### Figure S3. *Vibrio cholerae* positivity by incidence and suspected case characteristics
+
+Relationship between reported *V. cholerae* positivity and **A)** proportion of suspected cholera cases tests that were under 5 years of age, **B)** suspected cholera incidence rate per 10,000 at study site, **C)** proportion of suspected cases severely dehydrated, and **D)** proportion of suspected cases on antibiotics prior to testing. Size of the points is proportional to the number of cases tested, and shapes indicate which diagnostic test was used to confirm *V. cholerae* infection. Confidence intervals for Spearman rank correlation coefficients estimated using bootstrapping (nrep=1000). Smoothing method is loess (without weights). In **B)** estimated suspected cholera incidence rates for 2010-2016 (Lessler et al., 2018) were aggregated to the administrative division that best represented each study’s catchment area by dividing the total estimated cholera cases in each area by its estimated population.
+
+```{r}
+# prep data
+df_cont <- df %>%
+  # select cols
+  group_by(study_id, country_iso3, diagnostic_test_type,
+           study_design, sampling_quality, surveillance_type,
+           prop_antibiotics, prop_severe_dehyd,
+           cases_min_age, prop_5) %>%
+  # aggregate by study-period
+  summarize(n_cases_tested = sum(n_cases_tested),
+            n_cases_positive = sum(n_cases_positive)) %>%
+  ungroup %>%
+  # transform variables of interest
+  mutate(posrate = n_cases_positive/n_cases_tested)
+```
+
+```{r}
+# plot relationship between incidence and positivity rates
+df_cor <- df_cont %>% 
+  dplyr::select(study_id, posrate, sampling_quality, surveillance_type, 
+                diagnostic_test_type, cases_min_age, n_cases_tested, prop_5) %>%
+  na.omit()
+
+ct <- spearman.ci(df_cor$posrate, df_cor$prop_5)
+
+# plot relationship between walking time to health facilities and incidence
+figS3a <- ggplot(df_cor, aes(y=posrate, x = prop_5)) +
+  geom_point(alpha = 0.6, aes(size = n_cases_tested, shape = diagnostic_test_type)) +
+  theme_bw() +
+  theme(legend.position = 'bottom') +
+  annotate('text', x = 0.5, y = 1.03, color = 'darkgreen',
+           label = paste0('Spearman rho = ', signif(ct$estimate, 2), 
+                          ' (95% Confidence Interval ', signif(ct$conf.int[[1]],2), 
+                          ' to ', signif(ct$conf.int[[2]],2), ')')) +
+  geom_smooth(method = 'loess',  color='purple')+
+  labs(x = 'Proportion under 5', y = 'Proportion positive',
+       size = NULL, shape = NULL)
+```
+
+```{r}
+# plot relationship between incidence and positivity rates
+df_cor <- df_all %>% 
+  # select cols
+  group_by(study_id, country_iso3, admin_min, inc_calc, diagnostic_test_type, 
+           sampling_quality, surveillance_type, cases_min_age) %>%
+  # aggregate
+  summarize(n_cases_tested = sum(n_cases_tested),
+            n_cases_positive = sum(n_cases_positive)) %>%
+  ungroup %>%
+  # transform variables of interest
+  mutate(posrate = n_cases_positive/n_cases_tested,
+         inc_calc_10000 = inc_calc * 10000) %>%
+  na.omit()
+
+ct <- spearman.ci(df_cor$posrate, df_cor$inc_calc_10000)
+
+# plot relationship between positivity rate and incidence
+figS3b <- ggplot(df_cor, aes(y=posrate, x = inc_calc_10000)) +
+  geom_point(alpha = 0.6, aes(size = n_cases_tested, shape = diagnostic_test_type)) +
+  scale_x_continuous(trans='log10') +
+  theme_bw() +
+  theme(legend.position = 'bottom') +
+  annotate('text', x = 0.28, y = 1.02, color = 'darkgreen',
+           label = paste0('Spearman rho = ', signif(ct$estimate, 2), 
+                          ' (95% Confidence Interval ', signif(ct$conf.int[[1]],2), 
+                          ' to ', signif(ct$conf.int[[2]],2), ')')) +
+  geom_smooth(method = 'loess',  color='purple')+
+  labs(x = 'Incidence (per 10,000)', y = 'Proportion positive',
+       size = NULL, shape = NULL) 
+```
+
+```{r}
+# plot relationship between incidence and positivity rates
+df_cor <- df_cont %>% 
+  dplyr::select(study_id, sampling_quality, surveillance_type, cases_min_age,
+                diagnostic_test_type, n_cases_tested, posrate, prop_antibiotics) %>%
+  na.omit()
+
+ct <- spearman.ci(df_cor$posrate, df_cor$prop_antibiotics)
+
+# plot relationship between positivity rate and incidence
+figS3c <- ggplot(df_cor, aes(y=posrate, x = prop_antibiotics)) +
+  geom_point(alpha = 0.6, aes(size = n_cases_tested, shape = diagnostic_test_type)) +
+  theme_bw() +
+  theme(legend.position = 'bottom') +
+  scale_size_continuous(breaks = c(1000, 3000, 5000)) +
+  annotate('text', x = 0.23, y = 1.02, color = 'darkgreen',
+           label = paste0('Spearman rho = ', signif(ct$estimate, 2), 
+                          ' (95% Confidence Interval ', signif(ct$conf.int[[1]],2), 
+                          ' to ', signif(ct$conf.int[[2]],2), ')')) +
+  geom_smooth(method = 'loess',  color='purple')+
+  labs(x = 'Proportion on antibiotics', y = 'Proportion positive',
+       size = NULL, shape = NULL) 
+```
+
+```{r}
+# plot relationship between incidence and positivity rates
+df_cor <- df_cont %>% 
+  dplyr::select(study_id, sampling_quality, surveillance_type, cases_min_age,
+                diagnostic_test_type, n_cases_tested, posrate, prop_severe_dehyd) %>%
+  na.omit()
+
+ct <- spearman.ci(df_cor$posrate, df_cor$prop_severe_dehyd)
+
+# plot relationship between positivity rate and incidence
+figS3d <- ggplot(df_cor, aes(y=posrate, x = prop_severe_dehyd)) +
+  geom_point(alpha = 0.6, aes(size = n_cases_tested, shape = diagnostic_test_type)) +
+  theme_bw() +
+  theme(legend.position = 'bottom') +
+  scale_size_continuous(breaks = c(100, 300, 500)) +
+  annotate('text', x = 0.45, y = 1.02, color = 'darkgreen',
+           label = paste0('Spearman rho = ', signif(ct$estimate, 2), 
+                          ' (95% Confidence Interval ', signif(ct$conf.int[[1]],2), 
+                          ' to ', signif(ct$conf.int[[2]],2), ')')) +
+  geom_smooth(method = 'loess',  color='purple')+
+  labs(x = 'Proportion severely dehydrated', y = 'Proportion positive',
+       size = NULL, shape = NULL) 
+```
+
+```{r figS3, fig.width = 10, fig.height = 10}
+cowplot::plot_grid(figS3a, figS3b, figS3d, figS3c,
+                   nrow = 2,
+                   labels = c('A', 'B', 'C', 'D'))
+```
+
+<br>
+
+## Adjusted underlying *V. cholerae* positivity
+
+```{r jags-validation-data}
+# Re-create dataset using validation data from Fig 2, Table 4, and text of Debes et al. 2021
+# https://www.ncbi.nlm.nih.gov/pmc/articles/PMC8176501/
+df_ken <- rbind(
+  data.frame(id = 1:8, culture=1, pcr=0, rdt=1),
+  data.frame(id = 1:69, culture=1, pcr=1, rdt=1),
+  data.frame(id = 1:2, culture=0, pcr=1, rdt=1),
+  data.frame(id = 1:2, culture=0, pcr=1, rdt=0),
+  data.frame(id = 1:149, culture=0, pcr=0, rdt=0)
+)
+df_ken$id <- NULL
+
+# Re-create dataset using validation data from Table 2 and Fig 3 of Sayeed et al. 2018
+# The results for Cholkit and Crystal VC are the same comapred to the other tests
+# https://journals.plos.org/plosntds/article?id=10.1371/journal.pntd.0006286
+df_bgd <- rbind(
+  data.frame(id = 1:15, culture=1, pcr=1, rdt=1),
+  data.frame(id = 1:6, culture=0, pcr=1, rdt=1),
+  data.frame(id = 1:4, culture=1, pcr=0, rdt=1),
+  data.frame(id = 1:5, culture=0, pcr=0, rdt=1),
+  data.frame(id = 1:47, culture=0, pcr=0, rdt=0)
+)
+df_bgd$id <- NULL
+
+# Validation data from Table 1 of Ontweka et al. 2016 PLOS ONE
+# https://journals.plos.org/plosone/article?id=10.1371/journal.pone.0168257
+df_ssd <- read_xlsx(here::here('data', 'raw_data', 'pone.0168257.s002.xlsx')) %>%
+  dplyr::select(`...12`, `...14`, `...9`) 
+
+names(df_ssd) <- c('culture', 'pcr', 'rdt')
+df_ssd <- df_ssd[-c(1,2),]
+
+df_ssd <- df_ssd %>%
+  mutate(culture = ifelse(culture=='Negative', 0, 1),
+         rdt = as.numeric(rdt),
+         rdt = ifelse(rdt==2, 1, rdt),
+         pcr = as.numeric(pcr)) %>%
+  na.omit()
+
+# Validation data from Mwaba et al. 2018
+# https://onlinelibrary.wiley.com/doi/full/10.1111/tmi.13084
+df_zmb_pcr <- read_xlsx(here::here('data', 'raw_data', 'Lusaka_2016_PCR.xlsx')) %>%
+ dplyr::select(Sample, `Final result`) %>%
+ na.omit() %>%
+ mutate(`Final result` = ifelse(`Final result` == '+', 1, 0))
+
+df_zmb_rdt <- read_xlsx(here::here('data', 'raw_data', 'Lusaka_2016_RDT.xlsx'),
+                       range = 'C4:L237') %>%
+ # Included in the paper
+ dplyr::filter(Include==1) %>%
+ mutate(Sample = as.numeric(gsub('o', '', ID))) %>%
+ mutate(`Direct RDT` = ifelse(`APW RDT` == '+' | `Direct RDT` == 'Pos', 1, 0),
+        Culture = ifelse(Culture == '+' | Culture == 'Pos', 1, 0))
+
+df_zmb <- merge(df_zmb_rdt%>%dplyr::select(Sample, Culture, `Direct RDT`),
+               df_zmb_pcr) %>%
+ dplyr::select(Culture, `Final result`, `Direct RDT`)
+
+names(df_zmb) <- c('culture', 'pcr', 'rdt')
+rm(df_zmb_pcr, df_zmb_rdt)
+
+# create parent dataset and vector with study label
+df_val <- rbind(df_ken, df_bgd, 
+                df_ssd, df_zmb
+                )
+val_id <- c(rep(1, nrow(df_ken)),
+            rep(2, nrow(df_bgd)),
+            rep(3, nrow(df_ssd)),
+            rep(4, nrow(df_zmb))
+            )
+```
+
+```{r jags-model-results}
+# file to save to
+jags_est_file <- here::here('data', 'generated_data', 'sens_spec_estimates', 
+                            paste0('sens-spec-', jags_run_id, '.rds'))
+jags_fit <- readRDS(jags_est_file)
+
+# randomly select draws to run in stan
+draws <- round(runif(se_sp_draws, 1, 4000))
+se_draws <- jags_fit$BUGSoutput$sims.list$mu_se[draws, ]
+sp_draws <- jags_fit$BUGSoutput$sims.list$mu_sp[draws, ]
+colnames(se_draws) <- colnames(sp_draws) <- c('Culture', 'PCR', 'RDT')
+
+# also save study-specific estimates
+# first index is draw, second is test, third is study
+se_study <- jags_fit$BUGSoutput$sims.list$se[draws, , ]
+sp_study <- jags_fit$BUGSoutput$sims.list$sp[draws, , ]
+```
+
+### Table S3. Estimated sensitivity and specificity of each diagnostic test
+
+Estimate is median sensitivity and specificity pooled across four studies that reported results for all diagnostics tests, as described in Methods. Parentheses show 95% Credible Interval.
+
+```{r tabS3}
+# extract sensitivity and specificity estimates
+se_sp_est <- jags_fit$BUGSoutput$summary[2:7, c('2.5%', '50%', '97.5%')]
+se_sp_est <- round(se_sp_est, 3)*100
+
+# table S2
+tabS3 <- data.frame('Measure' = c(rep('Sensitivity', 3), rep('Specificity', 3)),
+                    'Test' = rep(c('Culture', 'PCR', 'RDT'), 2),
+                    'Estimate' = paste(se_sp_est[,2],'(',se_sp_est[,1],'-',se_sp_est[,3],')'))
+
+names(tabS3) <- c('Measure', 'Test', 'Estimate (%)')
+pretty_table(tabS3)
+
+tabS3 %>%
+  flextable() %>%
+  save_as_docx(path = here::here('code/tables/tableS3.docx'))
+```
+
+```{r epi-data-stan}
+# set covariates
+covs <- c('sampling_quality', 'cases_min_age', 'cases_dehydrated', # adjust for these
+          'surveillance_type') # examine differences by these (and age categories in separate analysis)
+
+# positivity rates from meta-analysis primary dataset
+sr_dat <- df %>%
+  group_by_at(c('study_id', 'country_iso3', 'region', covs,
+                'diagnostic_test_type', 'diagnostic_test_name')) %>%
+  summarize(n_cases_tested = sum(n_cases_tested),
+            n_cases_positive = sum(n_cases_positive)) %>%
+  ungroup()
+
+# cast number tested by test type
+test_dat <- sr_dat %>%
+  reshape2::dcast(as.formula(paste0(paste0(c('study_id', 'country_iso3', 'region', covs), 
+                                           collapse = '+'), 
+                                    '~ diagnostic_test_type')),
+                  value.var = 'n_cases_tested', fill = 0)
+
+# cast number positive by test type
+pos_dat <- sr_dat %>%
+  reshape2::dcast(as.formula(paste0(paste0(c('study_id', 'country_iso3', 'region', covs), 
+                                           collapse = '+'), 
+                                    '~ diagnostic_test_type')),
+                  value.var = 'n_cases_positive', fill = 0)
+
+# add random effect label by observation
+test_dat <- test_dat %>% mutate(study_lab = 1:nrow(test_dat))
+pos_dat <- pos_dat %>% mutate(study_lab = 1:nrow(test_dat))
+```
+
+```{r}
+proppos <- data.frame(run_id = NA,
+                      stan_id = NA,
+                      median = NA,
+                      lower = NA,
+                      upper = NA,
+                      row.names = NULL)
+
+file_names <- list.files(here::here('data', 'generated_data', 'adjusted_positivity_rates'))
+
+for (i in file_names) {
+  
+  posrate <- readRDS(here::here('data', 'generated_data', 'adjusted_positivity_rates', i))
+  model_name <- gsub('posrate-|-full|-d1000|\\.rds', '', i)
+  
+  # save positivity rates results
+  proppos <- rbind(proppos,
+                   data.frame(run_id = model_name,
+                              stan_id = 'proportion positive',
+                              median = median(posrate$mu_p, na.rm = T),
+                              lower = quantile(posrate$mu_p, probs = .025, na.rm = T),
+                              upper = quantile(posrate$mu_p, probs = .975, na.rm = T),
+                              row.names = NULL
+                              )
+                   )
+  
+  # save beta coefficients
+  for (c in names(posrate$beta)) {
+    if (c != '(Intercept)') {
+      proppos <- rbind(proppos,
+                       data.frame(
+                         run_id = model_name,
+                         stan_id = c,
+                         median = median(posrate[['beta']][[c]], na.rm = T),
+                         lower = quantile(posrate[['beta']][[c]], probs = .025, na.rm = T),
+                         upper = quantile(posrate[['beta']][[c]], probs = .975, na.rm = T),
+                         row.names = NULL
+                       )
+      )
+    }
+  }
+  
+}
+
+# tidy results
+proppos <- proppos %>%
+  drop_na() %>%
+  mutate(median=round(median,2),
+         lower=round(lower,2),
+         upper=round(upper,2))
+```
+
+<br>
+
+### Figure S4. Posterior distributions of *V. cholerae* positivity
+
+Posterior distributions of underlying true *V. cholerae* positivity estimated using the random-effects model adjusted for diagnostic test sensitivity and specificity and study methods (i.e., sampling quality and age minimum in case definition), corresponding to results in Table 2. **A)** Prior (green) and posterior distribution (purple) of positivity in logit space. **B)** Prior (green) and posterior predictive distribution (purple) of positivity in logit space. **C)** Histogram of estimated positivity, or the true underlying proportion positive, based on studies in the meta-analysis. **D)** Histogram of the posterior predictive distribution of positivity, or what we predict the underlying proportion positive would be in a new hypothetical study site.
+
+```{r figS4, fig.width = 8, fig.height=6}
+# distribution of percent positive
+posrate <- readRDS(here::here('data', 'generated_data', 'adjusted_positivity_rates',
+                              paste0('posrate-mod2-d1000-full.rds')))
+
+s4a <- plot_prior_post(logit(posrate$mu_p), 
+                'Proportion positive, adjusted for methods', 
+                'logit(proportion positive)',
+                arg1=0, arg2=1, dprior='dnorm')
+
+s4b <- plot_prior_post(logit(posrate$p_pred$p_pred), 
+                'Posterior predictive distribution', 
+                'logit(proportion positive)',
+                arg1=0, arg2=1, dprior='dnorm')
+
+# get quantiles
+mu_quant <- quantile(posrate$mu_p, c(0.025, 0.5, 0.975))
+
+s4c <- ggplot() +
+  geom_histogram(aes(posrate$mu_p))+
+  xlim(c(0,1)) +
+  theme_classic() +
+  xlab('Proportion positive')
+
+pred_quant <- quantile(posrate$p_pred$p_pred, c(0.025, 0.5, 0.975))
+
+s4d <- ggplot() +
+  geom_histogram(aes(posrate$p_pred$p_pred)) +
+  xlim(c(0,1)) +
+  theme_classic() + 
+  theme_classic() + xlab('Posterior predictive distribution')
+
+# plot
+cowplot::plot_grid(s4a, s4b, s4c, s4d, labels = c('A', 'B', 'C', 'D'))
+
+# save
+message(pred_quant)
+prop_pos_pred <- posrate$p_pred$p_pred
+save(prop_pos_pred, file = here::here('data', 'generated_data', 'predictions', 'prop_pos_pred.RData'))
+```
+
+<br>
+
+### Table S4. Estimated underlying *V. cholerae O1/O139* positivity
+
+"Unadjusted" is mean percent positive (95% confidence interval) from random effects meta-analysis implemented using R package "meta" without any adjustments. "Adjusted" is the underlying true percent positive (95% credible interval) estimated using the Bayesian hierarchical model, adjusted for sensitivity/specificity of the tests, age in case definition, sampling quality, and whether or not surveillance was initiated in response to an outbreak. Also includes sensitivity analysis of increasing variance on all priors
+
+```{r}
+df_meta <- df %>%
+  group_by(study_id, country_iso3, study_design,
+           sampling_quality, diagnostic_test_type, diagnostic_test_name) %>%
+  summarize(n_cases_tested = sum(n_cases_tested),
+            n_cases_positive = sum(n_cases_positive)) %>%
+  ungroup() %>%
+  mutate(study_lab = paste0(country_iso3, '-', study_id)) %>%
+  arrange(country_iso3, study_id)
+
+ma_unadj <- metaprop(n_cases_positive, n_cases_tested,
+                     studlab = df_meta$study_lab, data = df_meta)
+```
+
+```{r tabS4}
+# results from RE meta-analysis in metafor with no adjustments
+pr1 <- c(0.37, 0.41, 0.46)
+
+# median adjusted proportion positive
+pr2 <- proppos %>%
+  filter(run_id %in% c('mod1', 'mod2', 'mod3', 'mod3-sa'), stan_id == 'proportion positive') %>%
+  dplyr::select(lower, median, upper) %>%
+  round(2)
+
+pr2 <- rbind(pr1, pr2)
+pr2 <- pr2*100
+
+pr2 <- pr2 %>%
+  mutate(variable = c('Unadjusted', 
+                      'Adjusted:\ntests',
+                      'Adjusted:\ntests,\nmethods',
+                      'Adjusted:\ntests,\nmethods,\noutbreak',
+                      'Adjusted:\ntests,\nmethods,\noutbreak,\ntest priors')) %>%
+  mutate(variable = factor(variable, levels = c('Unadjusted', 
+                      'Adjusted:\ntests',
+                      'Adjusted:\ntests,\nmethods',
+                      'Adjusted:\ntests,\nmethods,\noutbreak',
+                      'Adjusted:\ntests,\nmethods,\noutbreak,\ntest priors')))
+
+# table S4
+tabS4 <- data.frame('Version' = c('Unadjusted', 
+                                 'Adjusted for test performance',
+                                 'Adjusted for test performance & methods',
+                                 'Adjusted for test performance, methods, & outbreak setting',
+                                 'Adjusted for test performance, methods, & outbreak setting, increased variance on priors'),
+                   'Positivity rate' = paste(pr2[,2],'(',pr2[,1],'-',pr2[,3],')'))
+
+names(tabS4) <- c('Version', 'Positivity (%)')
+pretty_table(tabS4)
+
+tabS4 %>%
+  flextable() %>%
+  save_as_docx(path = here::here('code/tables/tableS4.docx'))
+```
+
+<br>
+
+### Figure 3. Estimated underlying *V. cholerae* positivity
+
+**A)** Posterior distributions of pooled percent sensitivity and specificity of culture (top), PCR (middle), and RDT (bottom) for detecting V. cholerae O1O139 infections in suspected cholera cases. Dashed lines represent median values of each distribution. **B)** "Unadjusted" is mean percent positive (95% confidence interval) from random effects meta-analysis implemented using R package "meta" without any adjustments. "Adjusted" is the underlying true percent positive (95% credible interval) estimated using the Bayesian hierarchical model, adjusted for sensitivity/specificity of the tests, age in case definition, sampling quality, and whether or not surveillance was initiated in response to an outbreak.
+
+```{r fig3, fig.width = 6.5, fig.height = 4.5}
+# set colors
+pal <- c('grey30', brewer.pal(n=4, name='Dark2'))
+
+# positivity plot
+f3b <- ggplot(pr2) +
+          geom_point(aes(x = variable, y = median, color = variable), size = 2) +
+          geom_errorbar(aes(x = variable, ymin = lower, ymax = upper, color = variable), width = 0.3) +
+          scale_color_manual(values = pal) +
+          theme_bw() +
+          theme(legend.position = 'none') +
+          ylab('Positivity (%)') + xlab(NULL) +
+          ggtitle('Unadjusted and adjusted positivity')
+
+# posterior of sensitivity and specificity
+pal <- brewer.pal(11, 'PRGn')
+
+se_long <- melt(se_draws) %>%
+  mutate(measure = 'Sensitivity')
+sp_long <- melt(sp_draws) %>%
+  mutate(measure = 'Specificity')
+
+long <- rbind(se_long, sp_long)
+
+# medians
+ss_meds <- long %>% 
+  group_by(Var2, measure) %>%
+  summarize(value = median(value)*100) %>%
+  ungroup()
+
+f3a <- ggplot(long) + 
+  geom_vline(data=ss_meds%>%filter(measure == 'Sensitivity'), aes(xintercept = value), 
+             color = pal[9], linetype = 'dashed') +
+  geom_vline(data=ss_meds%>%filter(measure == 'Specificity'), aes(xintercept = value), 
+             color = pal[2], linetype = 'dashed') +
+  geom_density(aes(value*100, color = measure)) + 
+  theme_classic() +
+  facet_wrap('Var2', ncol = 1) +
+  xlab(NULL) + ylab('Posterior Density') + 
+  scale_color_manual(values = c(pal[9], pal[2]),
+                     name = NULL, 
+                     labels = c('Sensitivity', 'Specificity')) +
+  theme(legend.position = 'bottom',
+        legend.background=element_blank())
+
+cowplot::plot_grid(f3a, f3b,
+                   labels = c('A', 'B'),
+                   ncol = 2, rel_widths = c(0.7, 1))
+```
+
+<br>
+
+### Figure 4. Forest plot of study estimates and underlying positivity
+
+Black points indicate median study-level underlying positivity and 95% Credible Interval (CI). Teal, orange, and purple points indicate the proportion positive reported by study for culture, PCR, and RDT, respectively, and corresponding error bars indicate 95% confidence interval for a binomial probability. Studies are labeled by country ISO3 code, whether or not they used high quality sampling methods, and whether a minimum age was set in the suspected cholera case definition. Green distribution indicates median and 95% CI of pooled positivity. Pink distribution indicates median and 95% CI of posterior predictive distribution of positivity. Studies are split into outbreak and non-outbreak for ease of interpretation, but the green and pink distributions represent the global estimates across all studies. 
+
+```{r}
+# underlying positivity rate by study
+df_p <- posrate$p 
+
+# get median and 95% CI by study
+study_est <- data.frame(matrix(nrow=0, ncol=9))
+names(study_est) <- c('study_id', 'country_iso3', 'sampling_quality', 'cases_min_age',
+                      'surveillance_type', 'median', 'lower', 'upper')
+  
+for (i in 1:ncol(df_p)) {
+  study_est <- rbind(study_est,
+                     data.frame(study_id = test_dat[i, 'study_id'],
+                                country_iso3 = test_dat[i, 'country_iso3'],
+                                sampling_quality = test_dat[i, 'sampling_quality'],
+                                cases_min_age = test_dat[i, 'cases_min_age'],
+                                surveillance_type = test_dat[i, 'surveillance_type'],
+                                median = median(df_p[, i][[1]], na.rm = T),
+                                lower = quantile(df_p[, i][[1]], probs = .025, na.rm = T),
+                                upper = quantile(df_p[, i][[1]], probs = .975, na.rm = T)))
+}
+
+# add original study data
+study_est <- left_join(study_est, test_dat) %>%
+  dplyr::select(-study_lab) %>%
+  # proportion positive by test
+  mutate(Culture_p = pos_dat$Culture/test_dat$Culture,
+         PCR_p = pos_dat$PCR/test_dat$PCR,
+         RDT_p = pos_dat$RDT/test_dat$RDT) %>%
+  group_by(study_id, country_iso3, sampling_quality, cases_min_age, surveillance_type,
+           median, upper, lower, Culture_p, PCR_p, RDT_p) %>%
+  # binomial confidence intervals and variance for proportions
+  summarize(Culture_lower = binomial_ci(Culture_p, Culture)[[1]],
+            Culture_upper = binomial_ci(Culture_p, Culture)[[2]],
+            PCR_lower = binomial_ci(PCR_p, PCR)[[1]],
+            PCR_upper = binomial_ci(PCR_p, PCR)[[2]],
+            RDT_lower = binomial_ci(RDT_p, RDT)[[1]],
+            RDT_upper = binomial_ci(RDT_p, RDT)[[2]],
+            Culture_v = prop_var(Culture_p, Culture),
+            PCR_v = prop_var(PCR_p, PCR),
+            RDT_v= prop_var(RDT_p, RDT),
+            # maximum variance across studies that use multiple tests
+            #TODO check that this is OK
+            vi = max(c(Culture_v, PCR_v, RDT_v), na.rm=T)) %>%
+  ungroup()
+```
+
+```{r i2, message = TRUE}
+# calculate tau2, between-study heterogeneity
+# https://www.frontiersin.org/articles/10.3389/fvets.2020.00271/full
+# https://journals.sagepub.com/doi/full/10.1177/25152459211031256
+# taken from the Stan printed output
+tau2 <- inv.logit(1.3)
+
+# grab v, within-study sampling variance, dropping the study that reported 0 positives
+vi <- study_est%>%filter(vi!=0)%>%dplyr::select(vi)
+
+# calculate i2
+# https://www.metafor-project.org/doku.php/tips:i2_multilevel_multivariate#:~:text=For%20a%20standard%20random%2Deffects,ith%20i%20t
+k <- nrow(test_dat)-1 # dropped 1 study with 0 positives
+sum_wi <- sum(1/vi[[1]])
+sum_wi2 <- sum((1/vi[[1]])^2)
+v <- ((k-1)*sum_wi)/(sum_wi^2-sum_wi2)
+i2 <- 100*tau2/(tau2+v)
+
+message('I2: ', round(i2, 2), '; tau2: ', round(tau2, 2))
+```
+
+```{r fig4, fig.height = 8.5, fig.width = 8.5}
+# plot from lowest to highest median positivity
+setorderv(study_est, 'median')
+
+# create study labels
+study_est <- study_est %>%
+  mutate(study_lab = paste0(country_iso3, ' - ',
+                            ifelse(sampling_quality=='High', 'High - ', 'Low  - '),
+                            ifelse(cases_min_age==10, paste0('', cases_min_age),
+                                   paste0(' ', cases_min_age, ' '))))
+
+# forest plot for outbreak surveillance
+out <- forest_plot(study_est %>% 
+                     filter(surveillance_type=='Outbreak') %>%
+                     mutate(id = 1:nrow(study_est %>% filter(surveillance_type=='Outbreak')))) +
+  ggtitle('Outbreak surveillance')
+
+# forest plot for non-outbreak surveillance
+nonout <- forest_plot(study_est %>% 
+                        filter(surveillance_type=='Non-outbreak') %>%
+                        mutate(id = 1:nrow(study_est %>% filter(surveillance_type=='Non-outbreak')))) +
+  ggtitle('Non-outbreak surveillance')
+
+# plot together
+cowplot::plot_grid(out, nonout) 
+```
+
+<br>
+
+## Factors associated with variation in *V. cholerae* positivity
+
+### Table S5. Odds of *V. cholerae* positivity by age and outbreak context
+
+Odds that a suspected cholera case seeking testing or care has a true _V. cholerae_ O1/O139 infection with low sampling quality compared to high sampling quality, with increasing minimum age set in suspected case definition, and with surveillance initiated in response to an outbreak compared to non-outbreak surveillance  (i.e., routine or post-vaccination surveillance). 
+
+```{r tabS5}
+# median coefficients
+c1 <- proppos %>%
+  filter(run_id %in% c('mod3'),
+         stan_id == 'sampling_qualityLow' | stan_id == 'cases_min_age' | stan_id == 'surveillance_typeOutbreak') %>%
+  dplyr::select(lower, median, upper) %>%
+  round(2) %>%
+  mutate(variable = c('Low sampling quality',
+                      'Minimum age in\ncase definition',
+                      'Outbreak surveillance'))
+
+# table S5
+tabS5 <- data.frame('Variable' = c('Low sampling quality',
+                                  'Minimum age in case definition',
+                                  'Outbreak surveillance'),
+                   'Odds ratio' = paste(c1[,2],'(',c1[,1],'-',c1[,3],')'))
+
+names(tabS5) <- c('Variable', 'Odds ratio')
+pretty_table(tabS5)
+
+tabS5 %>%
+  flextable() %>%
+  save_as_docx(path = here::here('code/tables/tableS5.docx'))
+```
+
+<br>
+
+### Table S6. Odds of *V. cholerae* positivity by categorical age in case definition
+
+Odds that a suspected cholera case seeking care has a true _V. cholerae_ infection by minimum age set in suspected case defintion. Coefficients correspond to random effects models run with age as a categorical variable (reference group = no age minimum age explicitly set in case definition or 0). All other model settings and covariates are the same as in Table 3.
+
+```{r tabS6}
+# median coefficients
+c2 <- proppos %>%
+  filter(run_id %in% c('mod3c'), 
+         stan_id %like% 'cases_min_age' | stan_id %in% c('sampling_qualityLow', 'surveillance_typeOutbreak')) %>%
+  mutate(stan_id = gsub('cases_min_age_categage', '', stan_id),
+         stan_id = gsub('sampling_qualityLow', '0.1', stan_id),
+         stan_id = gsub('surveillance_typeOutbreak', '100', stan_id),
+         stan_id = as.numeric(stan_id)) %>%
+  arrange(stan_id) %>%
+  dplyr::select(lower, median, upper) %>%
+  round(2)
+
+# table S6
+tabS6 <- data.frame('Variable' = c('Low sampling quality', 
+                                   paste('Min age in case definition:', c('1','2','5','10')),
+                                   'Outbreak surveillance'),
+                    'Odds ratio' = paste(c2[,2],'(',c2[,1],'-',c2[,3],')'))
+
+names(tabS6) <- c('Variable', 'Odds ratio')
+pretty_table(tabS6)
+
+tabS6 %>%
+  flextable() %>%
+  save_as_docx(path = here::here('code/tables/tableS6.docx'))
+```
+
+<br>
+
+### Table S7. Sensitivity analysis of the odds of *V. cholerae* positivity by age and outbreak context
+
+Odds that a suspected cholera case seeking testing or care has a true _V. cholerae_ O1/O139 infection with low sampling quality compared to high sampling quality, with increasing minimum age set in suspected case definition, and with surveillance initiated in response to an outbreak compared to non-outbreak surveillance  (i.e., routine or post-vaccination surveillance) in models where variance was increased on all priors. 
+
+```{r tabS7, eval = TRUE}
+# median coefficients
+c1s <- proppos %>%
+  filter(run_id %in% c('mod3-sa'),
+         stan_id == 'sampling_qualityLow' | stan_id == 'cases_min_age' | stan_id == 'surveillance_typeOutbreak') %>%
+  dplyr::select(lower, median, upper) %>%
+  round(2)
+
+# table S7
+tabS7 <- data.frame('Variable' = c('Low sampling quality',
+                                   'Minimum age in case definition',
+                                   'Outbreak surveillance'),
+                   'Odds ratio' = paste(c1[,2],'(',c1[,1],'-',c1[,3],')'))
+
+names(tabS7) <- c('Variable', 'Odds ratio')
+pretty_table(tabS7)
+
+tabS7 %>%
+  flextable() %>%
+  save_as_docx(path = here::here('code/tables/tableS7.docx'))
+```
