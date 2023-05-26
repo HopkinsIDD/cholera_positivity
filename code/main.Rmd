@@ -107,7 +107,11 @@ shp_list <- readRDS(here::here("data", "shapefiles", "shp_list.RData"))
 
 ```{r load-incidence}
 # load calculated estimated incidence (based on raster) from folder, the raster we have only covers sub-saharan Africa, other places were marked as NA
-df_all <- suppressMessages(load_incidence(df_all))
+df_all <- suppressMessages(load_incidence(df_all%>%filter(country_iso3!='DZA'))) %>%
+  # add Algeria data back with appropriate columns
+  rbind(df_all %>% 
+          filter(country_iso3=='DZA') %>% 
+          mutate(admin_min_level=0, admin_min='Algeria', inc_calc=NA))
 ```
 
 ```{r aggregate-stratifications}
@@ -203,14 +207,14 @@ coverage_time <- df_all %>%
   mutate(time_period = case_when(TR <= as.Date("2004-12-31") ~ "1997~2004",
                                  TR > as.Date("2004-12-31") & TR <= as.Date("2009-12-31") ~ "2005~2009",
                                  TR > as.Date("2009-12-31") & TR <= as.Date("2014-12-31") ~ "2010~2014",
-                                 TR > as.Date("2014-12-31") ~ "2015~2019")) %>%
+                                 TR > as.Date("2014-12-31") ~ "2015~2022")) %>%
   # count by time (study ending time)
   count(country_iso3, time_period) %>% rename(variable = time_period, location_periods = n) %>%
   ungroup()
 
 # plot for each time period
 figS2 <- list()
-for (i in c("1997~2004", "2005~2009", "2010~2014", "2015~2019")) {
+for (i in c("1997~2004", "2005~2009", "2010~2014", "2015~2022")) {
   figS2[[i]] <- data_map(coverage_time, shp, ad = i)
 }
 

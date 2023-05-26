@@ -291,6 +291,7 @@ load_incidence <- function(df){
   
   # fill in inc_calc column in df_admin0
   for(i in 1:nrow(df_admin0)){
+    message(i)
     
     # if this entry has only one country
     if(str_detect(df_admin0$admin_min[i], ",") == FALSE){

@@ -5,7 +5,7 @@ jags_redo <- FALSE # set this to TRUE to re-run the jags_run_id, FALSE to load p
 jags_run_id <- 'jags-cd'
 
 # Stan settings
-stan_redo <- FALSE # set this to TRUE to re-run the stan_run_id corresponding to the stan_model and draws
+stan_redo <- TRUE # set this to TRUE to re-run the stan_run_id corresponding to the stan_model and draws
 stan_model <- 'mod1'# which Stan model to run
 se_sp_draws <- 1000 # number of draws of sens/spec to use from the JAGS model output
 data_sub <- 'full' # subset of the data to run; options = c('full', 'outbreak', 'non-outbreak', 'age0', 'age1', 'age2', 'age5', 'high', 'low')
