@@ -100,16 +100,13 @@ plot_posrate <- function(indat, x_col,
     # boxplot without outliers
     geom_boxplot(outlier.shape = NA) +
     # points (will include the outliers)
-    geom_jitter(aes(color = as.factor(get(color_col)), 
-                    shape = sampling_quality,
-                    alpha = sampling_quality)) +
+    geom_jitter(aes(color = as.factor(get(color_col))),
+                alpha = 0.75) +
     theme_bw() +
     # wrap x axis labels
     scale_x_discrete(labels = function(x) str_wrap(x, width = 15)) +
     # color by grouping variable
     scale_color_manual(values=brewer.pal(n=num_colors, name=palette)) +
-    # alpha by sampling quality
-    scale_alpha_discrete(range = c(0.85, 0.75), name = NULL) +
     # format axes
     theme(axis.text.x = element_text(angle = ifelse(rotate_x_labs, 45, 0), 
                                      hjust = ifelse(rotate_x_labs, 1, 0.5)),
@@ -130,7 +127,7 @@ data_map <- function(dt_plot, shp_plot, ad,
     # subset to gegraphic level
     filter(variable==ad) %>%
     # set an numbers above max num to max
-    mutate(plot_var = ifelse(location_periods > num_max, num_max, location_periods))
+    mutate(plot_var = ifelse(observations > num_max, num_max, observations))
   
   # add to shapefile
   dt_shp <- merge(shp_plot, dt_plot, by.x = 'ISO_A3', by.y = 'country_iso3', all = T)
@@ -391,6 +388,7 @@ run_analysis_stan <- function(model_script,
                               spec_draws,
                               redo,
                               chains,
+                              inits_list,
                               ...) {
   
   # Set analysis data
@@ -447,19 +445,20 @@ run_analysis_stan <- function(model_script,
                            num_pos = pos,
                            M = nrow(sens_draws),
                            sens = sens_draws,
-                           spec = spec_draws
+                           spec = spec_draws,
+                           init = inits_list
                          ),
                          chains = 4,
                          parallel_chains = 4,
                          iter_sampling = 4000,
                          iter_warmup = 2000,
-                         step_size = 0.1,
+                         step_size = 0.01,
                          adapt_delta = 0.99,
-                         max_treedepth = 20,
-                         refresh = 500 # print update every 2500 iters
+                         max_treedepth = 15,
+                         refresh = 250
                          )
 
-    saveRDS(stan_est, stan_out_file)
+    stan_est$save_object(stan_out_file)
   } else {
     cat("Model not re-run. Loading pre-computed posteriors from ", stan_out_file, "\n")
     stan_est <- readRDS(stan_out_file)
@@ -542,4 +541,21 @@ binomial_ci <- function(p, n, z = 1.96) {
 # calculate variance of a proportion
 prop_var <- function(p, n) {
   p*(1-p)/n
+}
+
+# get initial values from previous model run with four chains
+get_inits_list <- function(mod) {
+  # get mu_logit_p draws from model we're running
+  draws <- readRDS(here::here('data', 'generated_data', 'adjusted_positivity_initial_submission', 
+                              paste0('posrate-', mod, '-d1000-full.rds')))
+  mu <- logit(draws$mu_p)
+  iter <- length(mu)/4
+  # create inits list
+  inits <- list(mu_logit_p = c(
+    median(mu[1:iter]),
+    median(mu[(iter+1):(iter*2)]),
+    median(mu[(iter*2+1):(iter*3)]),
+    median(mu[(iter*3+1):(iter*4)])
+  ))
+  return(inits)
 }

@@ -6,7 +6,7 @@ jags_run_id <- 'jags-cd'
 
 # Stan settings
 stan_redo <- TRUE # set this to TRUE to re-run the stan_run_id corresponding to the stan_model and draws
-stan_model <- 'mod1'# which Stan model to run
+stan_model <- 'mod3'# which Stan model to run
 se_sp_draws <- 1000 # number of draws of sens/spec to use from the JAGS model output
 data_sub <- 'full' # subset of the data to run; options = c('full', 'outbreak', 'non-outbreak', 'age0', 'age1', 'age2', 'age5', 'high', 'low')
 sa <- FALSE # whether or not we're running a sensitivity analysis on the priors (increase variance)
@@ -18,7 +18,7 @@ test <- FALSE # add a 'test' flag to run_id
 # packages
 pacman::p_load('tidyverse', 'data.table', 'readxl',
                'stringr', 'lubridate', 'reshape2',
-               'cmdstanr', 'R2jags', 
+               'cmdstanr', 'R2jags', 'boot',
                'sf', 'raster', 'countrycode')
 
 # custom functions
@@ -235,8 +235,9 @@ if (!file.exists(jags_est_file) | jags_redo) {
 print(jags_fit)
 
 # randomly select draws to run in stan
-se_draws <- jags_fit$BUGSoutput$sims.list$mu_se[round(runif(se_sp_draws, 1, 4000)), ]
-sp_draws <- jags_fit$BUGSoutput$sims.list$mu_sp[round(runif(se_sp_draws, 1, 4000)), ]
+selected_draws <- round(runif(se_sp_draws, 1, 4000))
+se_draws <- jags_fit$BUGSoutput$sims.list$mu_se[selected_draws, ]
+sp_draws <- jags_fit$BUGSoutput$sims.list$mu_sp[selected_draws, ]
 colnames(se_draws) <- colnames(sp_draws) <- c('Culture', 'PCR', 'RDT')
 
 
@@ -291,8 +292,7 @@ out_est_file <- here::here('data', 'generated_data', 'adjusted_positivity_rates'
                            paste0('posrate-', stan_run_id, '.rds'))
 
 # model script
-model_script <- ifelse(!sa, here::here('code', 'meta_analysis_re.stan'),
-                       here::here('code', 'meta_analysis_re_sa.stan'))
+model_script <- ifelse(!sa, here::here('code', 'meta_analysis_re.stan'), here::here('code', 'meta_analysis_re_sa.stan'))
 
 # run model
 if (!file.exists(out_est_file) | stan_redo) {
@@ -305,7 +305,8 @@ if (!file.exists(out_est_file) | stan_redo) {
     coef_eqn = stan_coef_eqn,
     sens_draws = se_draws,
     spec_draws = sp_draws,
-    redo = stan_redo
+    redo = stan_redo,
+    inits_list = get_inits_list(stan_model) # note that I added this after the strong_prior and reparam tests were launched
   )
 
   saveRDS(posrate, out_est_file)
