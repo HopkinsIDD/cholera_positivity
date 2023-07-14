@@ -9,18 +9,30 @@
 data {
   
   // positivity rates from meta-analysis by test
-  int<lower=1> N_obs; // number of study-location-periods (observations) included in main analysis
+  int<lower=1> N_obs; // number of observations included in main analysis
   int<lower=1> J; // number of laboratory tests
-  int<lower=0> num_test[N_obs, J]; // number of suspected cholera cases in each study that were tested by each test
-  int<lower=0> num_pos[N_obs, J]; // number of participants from each study that tested positive by each test
+  int<lower=1> N_obs_tests; // number of observations and tests included in the analysis
+  int<lower=1> num_test[N_obs_tests]; // number of suspected cholera cases in each study that were tested
+  int<lower=0> num_pos[N_obs_tests]; // number of participants from each study that tested positive
+  
+  // indices for test type used
+  int<lower=1> N_culture; // number of observations that used culture
+  int<lower=1> N_pcr; // number of observations that used pcr
+  int<lower=1> N_rdt; // number of observations that used rdt
+  int<lower=1> culture_id_long[N_culture]; // row ids for where culture was used for long dataset
+  int<lower=1> pcr_id_long[N_pcr]; // row ids for where pcr was used for long dataset
+  int<lower=1> rdt_id_long[N_rdt]; // row ids for where rdt was used for long dataset
+  int<lower=1> culture_id_wide[N_culture]; // row ids for where culture was used for wide dataset
+  int<lower=1> pcr_id_wide[N_pcr]; // row ids for where pcr was used for wide dataset
+  int<lower=1> rdt_id_wide[N_rdt]; // row ids for where rdt was used for wide dataset
   
   // random effect
   int<lower=1> N_re; // number of unique random effect categories
-  int<lower=1, upper=N_re> re[N_obs]; // random effect corresponding to observation
+  int<lower=1, upper=N_re> re[N_obs]; // random effect corresponding to observation for wide dataset
 
   // covariates
   int<lower=1> p_vars; // number of variables to adjust for
-  matrix[N_obs, p_vars] X; // covariate model matrix
+  matrix[N_obs, p_vars] X; // covariate model matrix for wide dataset
   
   // sensitivity and specificity estimates
   int<lower=1> M; // number of posterior draws of sensitivity/specificity
@@ -28,11 +40,15 @@ data {
   matrix[M, J] spec; // draws of specificity for each test
 }
 
-parameters {
-  // positivity overall
-  real mu_logit_p;
-  real<lower = 0> sigma_logit_p;
+transformed data {
+  // sample one of the sensitivity/specificity draws;
+  int<lower = 1, upper = M> m;
+  simplex[M] uniform = rep_vector(1.0 / M, M);
+  m = categorical_rng(uniform); 
+}
 
+parameters {
+  real alpha; // intercept
   vector[p_vars] beta; // fixed regression coefficients
   real<lower=0> sigma_re; // variability of random effect
   vector[N_re] eta_re; // standard normals for the random effect
@@ -42,39 +58,23 @@ transformed parameters {
   // probability of positive Vc result for each observation
   vector[N_obs] logit_p; 
   vector<lower=0, upper=1>[N_obs] p;
-  logit_p = X * beta + sigma_re * eta_re[re];
+  logit_p = alpha + X * beta + sigma_re * eta_re[re];
   p = inv_logit(logit_p);
 }
 
 model {
   
-  real lp[J, M];
-  
   // proportion positive
-  for (j in 1:J) {
-    for (m in 1:M) {
-      lp[j, m] = binomial_lpmf(num_pos[,j] | num_test[,j], p*sens[m,j]+(1-p)*(1-spec[m,j]));
-    }
-  }
-  
-  for (j in 1:J) {
-    target += -log(M) + log_sum_exp(to_vector(lp[j,]));
-  }
+  // culture
+  target += binomial_lpmf(num_pos[culture_id_long] | num_test[culture_id_long], p[culture_id_wide]*sens[m,1]+(1-p[culture_id_wide])*(1-spec[m,1]));
+  // pcr
+  target += binomial_lpmf(num_pos[pcr_id_long] | num_test[pcr_id_long], p[pcr_id_wide]*sens[m,2]+(1-p[pcr_id_wide])*(1-spec[m,2]));
+  // rdt
+  target += binomial_lpmf(num_pos[rdt_id_long] | num_test[rdt_id_long], p[rdt_id_wide]*sens[m,3]+(1-p[rdt_id_wide])*(1-spec[m,3]));
 
-  // priors on coefficients and random effect
-  target += normal_lpdf(beta | 0, 2); // increased variance
-  target += normal_lpdf(eta_re | 0, 2); // increased variance
-
-  // priors for pooling positivity rates
-  target += normal_lpdf(logit_p | mu_logit_p, sigma_logit_p);
-  target += normal_lpdf(sigma_logit_p | 0, 2); // increased variance
-  target += normal_lpdf(mu_logit_p | 0, 2); // increased variance
+  // priors on intercept, coefficients, random effect, and sigma_re
+  target += normal_lpdf(beta | 0, 2);
+  target += normal_lpdf(eta_re | 0, 1);
+  target += normal_lpdf(sigma_re | 0, 1);
+  target += normal_lpdf(alpha | 0.9, 2); // shift
 }
-
-generated quantities {
-
-  // posterior predictive distribution for underlying true positive
-  real logit_p_pred = normal_rng(mu_logit_p, sigma_logit_p);
-  real p_pred = inv_logit(logit_p_pred);
-}
-

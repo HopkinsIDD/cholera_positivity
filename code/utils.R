@@ -64,25 +64,19 @@ forest_plot <- function(plot_dt) {
     geom_point(aes(y = id, x = RDT_p, color = 'RDT'), shape = 1, size = 0.85) +
     geom_errorbarh(aes(y = id, xmin = RDT_lower, xmax = RDT_upper, color = 'RDT'), height = 0.1) +
     # study-level underlying positivity rates
-    geom_point(aes(y = id, x = median, color = 'Adjusted'), size = 0.95) +
-    geom_errorbarh(aes(y = id, xmin = lower, xmax = upper), height = 0.1) +
-    # blank (send it off the plotting area with +10)
-    geom_point(aes(y = max(plot_dt$id)+1, x = pred_quant[2]+10), color = pal[4], size = 1.15) +
-    geom_errorbarh(aes(y = max(plot_dt$id)+1, xmin = pred_quant[1]+10, xmax = pred_quant[3]+10), color = pal[4]) +
-    # global underlying positivity rate
-    geom_point(aes(y = max(plot_dt$id)+2, x = mu_quant[2]), color = 'grey30', size = 1.15) +
-    geom_errorbarh(aes(y = max(plot_dt$id)+2, xmin = mu_quant[1], xmax = mu_quant[3]), color = 'grey30') +
+    geom_point(aes(y = id, x = mean, color = 'Adjusted'), size = 0.95, alpha = 0.7) +
+    geom_errorbarh(aes(y = id, xmin = lower, xmax = upper), height = 0.1, alpha = 0.7) +
     # scale axes
     scale_x_continuous(limits = c(0,1), breaks = c(0,0.25,0.5,0.75,1), name = 'Proportion positive') +
-    scale_y_continuous(name = '', breaks = 1:(length(plot_dt$study_lab)+2),
-                       labels = c(plot_dt$study_lab, ' ', 'Global RE model'), 
+    scale_y_continuous(name = '', breaks = 1:(length(plot_dt$study_lab)),
+                       labels = plot_dt$study_lab, 
                        trans = 'reverse') +
     # legend
-    scale_color_manual(name = 'Positivity', values = cols) +
+    scale_color_manual(name = NULL, values = cols) +
     # rotate labels
     theme_minimal() +
     theme(panel.spacing = unit(1, 'lines'),
-          legend.position = c(0.85, 0.85)) +
+          legend.position = c(0.86, 0.9)) +
     theme(strip.text.y = element_text(angle = 0),
           axis.text.y = element_text(size = 8))
 }
@@ -369,7 +363,9 @@ load_incidence <- function(df){
 #' @param model_script Stan model script
 #' @param dat_suspected number of suspected cases tested by test
 #' @param dat_confirmed number of suspected cases confirmed by test
+#' @param dat_covars covariates by study, wide format
 #' @param re_ids vector of ids corresponding to the variable to use as a random effect
+#' @param test_ids vector of ids corresponding to which test was used
 #' @param run_id unique id for run, will be in saved file name
 #' @param coef_eqn formula in character format expressing the probability of positivity on the logit scale
 #' @param sens_draws vector of posterior draws of sensitivity from latent class analysis
@@ -381,40 +377,29 @@ load_incidence <- function(df){
 run_analysis_stan <- function(model_script,
                               dat_suspected,
                               dat_confirmed,
+                              dat_covars,
                               re_ids,
+                              test_ids,
                               run_id,
                               coef_eqn,
                               sens_draws,
                               spec_draws,
                               redo,
                               chains,
-                              inits_list,
+                              adjust_tests,
                               ...) {
   
   # Set analysis data
   dat_suspected <- as_tibble(dat_suspected)
   dat_confirmed <- as_tibble(dat_confirmed)
-  
+  dat_covars <- as_tibble(dat_covars)
+
   # Get test names and number
   lab_tests <- colnames(sens_draws)
   n_tests <- length(lab_tests)
-
-  # Convert numbers tested to array
-  test <- dat_suspected[, lab_tests]
-  test <- array(
-    c(test[[lab_tests[1]]], test[[lab_tests[2]]], test[[lab_tests[3]]]), 
-    dim = c(length(test[[lab_tests[1]]]), n_tests)
-  )
-
-  # Convert numbers positive to array
-  pos <- dat_confirmed[, lab_tests]
-  pos <- array(
-    c(pos[[lab_tests[1]]], pos[[lab_tests[2]]], pos[[lab_tests[3]]]), 
-    dim = c(length(pos[[lab_tests[1]]]), n_tests)
-  )
   
   # Set model matrix
-  X <- model.matrix(as.formula(paste("~", coef_eqn)), data = dat_suspected)
+  X <- model.matrix(as.formula(paste("~", coef_eqn)), data = dat_covars)
   
   # Unique study ids from 1 to N
   u_re_ids <- unique(re_ids)
@@ -433,39 +418,94 @@ run_analysis_stan <- function(model_script,
     
     mod <- cmdstanr::cmdstan_model(model_script)
     
-    # Run stan model
-    stan_est <- mod$sample(data = list(
-                           N_obs = nrow(dat_suspected),
-                           J = n_tests,
-                           N_re = length(u_re_ids),
-                           re = re_ids,
-                           p_vars = ncol(X),
-                           X = X,
-                           num_test = test,
-                           num_pos = pos,
-                           M = nrow(sens_draws),
-                           sens = sens_draws,
-                           spec = spec_draws,
-                           init = inits_list
-                         ),
-                         chains = 4,
-                         parallel_chains = 4,
-                         iter_sampling = 4000,
-                         iter_warmup = 2000,
-                         step_size = 0.01,
-                         adapt_delta = 0.99,
-                         max_treedepth = 15,
-                         refresh = 250
-                         )
-
-    stan_est$save_object(stan_out_file)
+    # Run stan model with adjustments for test accuracy
+    if (adjust_tests) {
+      
+      stan_est <- mod$sample(data = list(
+        N_obs = length(u_re_ids), # random effect on each observation
+        N_obs_tests = nrow(dat_suspected),
+        J = n_tests,
+        N_re = length(u_re_ids), # random effect on each observation
+        re = re_ids,
+        p_vars = ncol(X),
+        X = X,
+        num_test = dat_suspected$n_cases_tested,
+        num_pos = dat_confirmed$n_cases_positive,
+        # number of studies that used each type of test
+        N_culture = length(which(test_ids == 1)), 
+        N_pcr = length(which(test_ids == 2)),
+        N_rdt = length(which(test_ids == 3)),
+        # row IDs for the dataset that is long by test
+        culture_id_long = which(test_ids == 1),
+        pcr_id_long = which(test_ids == 2),
+        rdt_id_long = which(test_ids == 3),
+        # row IDs for the dataset that is wide by test
+        culture_id_wide = which(!is.na(dat_covs$Culture)),
+        pcr_id_wide = which(!is.na(dat_covs$PCR)),
+        rdt_id_wide = which(!is.na(dat_covs$RDT)),
+        # draws of sensitivity and specificity
+        M = nrow(sens_draws),
+        sens = sens_draws,
+        spec = spec_draws
+      ),
+      chains = 4,
+      parallel_chains = 4,
+      iter_sampling = 2000,
+      iter_warmup = 1000,
+      step_size = 0.01,
+      adapt_delta = 0.99,
+      max_treedepth = 15,
+      refresh = 100
+      )
+    }
+    
+    # Run stan model without adjustments for test accuracy
+    if (!adjust_tests) {
+      
+      stan_est <- mod$sample(data = list(
+        N_obs = length(u_re_ids), # random effect on each observation
+        N_obs_tests = nrow(dat_suspected),
+        N_re = length(u_re_ids), # random effect on each observation
+        re = re_ids,
+        p_vars = ncol(X),
+        X = X,
+        num_test = dat_suspected$n_cases_tested,
+        num_pos = dat_confirmed$n_cases_positive,
+        # number of studies that used each type of test
+        N_culture = length(which(test_ids == 1)), 
+        N_pcr = length(which(test_ids == 2)),
+        N_rdt = length(which(test_ids == 3)),
+        # row IDs for the dataset that is long by test
+        culture_id_long = which(test_ids == 1),
+        pcr_id_long = which(test_ids == 2),
+        rdt_id_long = which(test_ids == 3),
+        # row IDs for the dataset that is wide by test
+        culture_id_wide = which(!is.na(dat_covs$Culture)),
+        pcr_id_wide = which(!is.na(dat_covs$PCR)),
+        rdt_id_wide = which(!is.na(dat_covs$RDT))
+      ),
+      chains = 4,
+      parallel_chains = 4,
+      iter_sampling = 2000,
+      iter_warmup = 1000,
+      step_size = 0.01,
+      adapt_delta = 0.99,
+      max_treedepth = 15,
+      refresh = 100
+      )
+    }
+    
+    # print summary
+    stan_est$cmdstan_summary()
+    # save model objects
+    stan_est$draws()
+    stan_est$sampler_diagnostics()
+    saveRDS(stan_est, stan_out_file)
   } else {
+    # load pre-computed posteriors
     cat("Model not re-run. Loading pre-computed posteriors from ", stan_out_file, "\n")
     stan_est <- readRDS(stan_out_file)
   }
-
-  # print summary
-  stan_est$cmdstan_summary()
 
   # extract draws for all parameters
   draws <- stan_est$draws(format = "df")
@@ -478,9 +518,6 @@ run_analysis_stan <- function(model_script,
   # pos table
   p_tbl <- draws[grep('^p\\[', names(draws))]
   
-  # pos pred table
-  p_pred_tbl <- draws[grep('^p_pred', names(draws))]
-  
   # re table
   e_tbl <- draws[grep('^eta_re\\[', names(draws))]
 
@@ -488,16 +525,14 @@ run_analysis_stan <- function(model_script,
   res <- list(
     beta = cov_tbl,
     model_mtx = X,
-    num_test = dat_suspected[, lab_tests],
-    num_pos = dat_confirmed[, lab_tests],
+    num_test = dat_suspected$n_cases_tested,
+    num_pos = dat_confirmed$n_cases_positive,
     sens = sens_draws,
     spec = spec_draws,
-    mu_p = exp(draws['mu_logit_p'][[1]])/(1+exp(draws['mu_logit_p'][[1]])),
-    sigma_p = exp(draws['sigma_logit_p'][[1]])/(1+exp(draws['sigma_logit_p'][[1]])),
     p = p_tbl,
-    p_pred = p_pred_tbl,
     e = e_tbl,
-    sigma_re = draws['sigma_re']
+    sigma_re = draws['sigma_re'],
+    alpha = draws['alpha']
   )
   
   return(res)
@@ -506,7 +541,6 @@ run_analysis_stan <- function(model_script,
 
 # plot prior and posterior for sensitivity/specificity draws from the JAGS model
 plot_prior_post <- function(post_draws, 
-                            test_name,
                             x_lab,
                             arg1 = 1,
                             arg2 = 1,
@@ -523,7 +557,7 @@ plot_prior_post <- function(post_draws,
     geom_density(aes(post_draws, color = pal[2])) + 
     scale_color_manual(values = c(pal[9], pal[2]), 
                        name = NULL, labels = c('Prior', 'Posterior')) +
-    ggtitle(test_name) + theme_classic() +
+    theme_classic() +
     xlab(x_lab) + ylab('Density') + 
     theme(legend.position = c(0.2, 0.7),
           legend.background=element_blank())
@@ -532,10 +566,9 @@ plot_prior_post <- function(post_draws,
 
 # calculate 95% confidence interval for a proportion using binomial probability
 # formula here: https://www.statology.org/binomial-confidence-interval-r/
-binomial_ci <- function(p, n, z = 1.96) {
-  upper <- p + 1.96*sqrt(p*(1-p)/n)
-  lower <- p - 1.96*sqrt(p*(1-p)/n)
-  return(c(lower, upper))
+binomial_ci <- function(p, n, a = 0.05) {
+  ci <- p + c(-qnorm(1-a/2), qnorm(1-a/2))*sqrt((1/n)*p*(1-p))
+  return(ci)
 }
 
 # calculate variance of a proportion
@@ -543,19 +576,120 @@ prop_var <- function(p, n) {
   p*(1-p)/n
 }
 
-# get initial values from previous model run with four chains
-get_inits_list <- function(mod) {
-  # get mu_logit_p draws from model we're running
-  draws <- readRDS(here::here('data', 'generated_data', 'adjusted_positivity_initial_submission', 
-                              paste0('posrate-', mod, '-d1000-full.rds')))
-  mu <- logit(draws$mu_p)
-  iter <- length(mu)/4
-  # create inits list
-  inits <- list(mu_logit_p = c(
-    median(mu[1:iter]),
-    median(mu[(iter+1):(iter*2)]),
-    median(mu[(iter*2+1):(iter*3)]),
-    median(mu[(iter*3+1):(iter*4)])
-  ))
-  return(inits)
+# create a data frame with the number of observations by study methods
+# for use in post-stratification later
+obs_by_cat <- function(dat, covs) {
+  
+  # get study observations
+  dat <- dat %>%
+    dplyr::select(c('study_id', 'country_iso3', 'cases_min_age_bin',
+                    'sampling_quality', 'surveillance_type')) %>%
+    unique()
+
+  # count number by covariates
+  props <- dat %>%
+    dplyr::count(across(all_of(covs))) %>%
+    mutate(prop = n/nrow(dat)) %>% 
+    replace(is.na(.), 0)
+  
+  # arrange alphabetically to make sure in same order as covs
+  props <- props %>%
+    dplyr::select(c(sort(covs), 'n', 'prop'))
+  
+  # convert to 0/1 values
+  if ('sampling_quality' %in% covs) {
+  props <- props %>%
+    mutate(sampling_quality = ifelse(sampling_quality == 'High', 0, 1))
+  }
+  if ('surveillance_type' %in% covs) {
+    props <- props %>%
+      mutate(surveillance_type = ifelse(surveillance_type == 'Outbreak', 1, 0))
+  }
+  
+  return(props)
+}
+
+# stratify estimates of V. cholerae positivity
+# using alpha, beta, and integrating over random effects,
+# nb: also post-stratifies
+# assuming that the proportion of all potential studies that use different methods
+# and case definitions match the proportions we found in the systematic review
+# but we do not include the post-stratified results because they are not meaningful
+stratify <- function(mod, cov_cats) {
+  
+  # load model draws
+  draws <- readRDS(here::here('data', 'generated_data', 'adjusted_positivity_rates',
+                              paste0('posrate-', mod, '.rds')))
+  
+  # extract parameters
+  beta <- cbind(draws[grep('alpha', names(draws))],
+                draws[grep('beta', names(draws))][[1]])
+  beta$`(Intercept)` <- NULL # using alpha intercept
+  sigma <- draws[grep('sigma_re', names(draws))][[1]][[1]]
+  
+  # covariate matrix
+  mod_eqns <- list(
+    'mod1' = '1',
+    'mod1-unadj' = '1',
+    'mod1-sa' = '1',
+    'mod2' = 'sampling_quality + cases_min_age_bin',
+    'mod3' = 'sampling_quality + cases_min_age_bin + surveillance_type',
+    'mod4' = 'sampling_quality + surveillance_type'
+  )
+  coef_eqn <- mod_eqns[[mod]]
+  cat_mat <- cov_cats %>%
+    model.matrix(as.formula(paste("~", coef_eqn)), data = .)
+  
+  # compute positivity estimates by age and sampling categories
+  cl <- parallel::makeCluster(8)
+  doParallel::registerDoParallel(cl)
+  
+  cat_p <- foreach(i = 1:nrow(cat_mat),
+                   .combine = rbind,
+                   .inorder = F,
+                   .packages = c("tidyverse", "foreach")) %dopar%
+    {
+      foreach(j = 1:nrow(beta),
+              .combine = rbind,
+              .inorder = T) %do%
+        {
+          
+          # compute positivity integrating across in observation random effects
+          pos <- integrate(function(x) {
+            plogis(qnorm(
+              x, as.matrix(beta[j, , drop = F]) %*% t(cat_mat[i, , drop = F]),
+              sigma[j]
+            ))
+          }, 0, 1)[[1]]
+          
+          # save results
+          tibble(
+            strat = i,
+            prop = cov_cats$prop[i],
+            pos = pos
+          ) %>%
+            mutate(sim = j)
+          
+      }
+  }
+  
+  parallel::stopCluster(cl)
+  
+  # overall positivity by draw, weighted by proportion of studies in each strata
+  p_est <- cat_p %>%
+    group_by(sim) %>%
+    summarize(pos = weighted.mean(pos, w = prop)) %>%
+    ungroup()
+  
+  # mean positivity by strata
+  strata_summary <- cat_p %>%
+    group_by(strat) %>%
+    summarize(mean = mean(pos),
+              lower = quantile(pos, 0.025),
+              upper = quantile(pos, 0.975)) %>%
+    ungroup() %>%
+    cbind(cat_mat)
+  
+  # end function
+  return(list(p_est, strata_summary))
 }

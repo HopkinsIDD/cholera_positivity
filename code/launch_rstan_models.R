@@ -6,10 +6,9 @@ jags_run_id <- 'jags-cd'
 
 # Stan settings
 stan_redo <- TRUE # set this to TRUE to re-run the stan_run_id corresponding to the stan_model and draws
-stan_model <- 'mod3'# which Stan model to run
-se_sp_draws <- 1000 # number of draws of sens/spec to use from the JAGS model output
-data_sub <- 'full' # subset of the data to run; options = c('full', 'outbreak', 'non-outbreak', 'age0', 'age1', 'age2', 'age5', 'high', 'low')
-sa <- FALSE # whether or not we're running a sensitivity analysis on the priors (increase variance)
+stan_model <- 'mod1' # which Stan model to run
+adjust_tests <- TRUE # whether or not to adjust for sensitivity/specificity of the tests
+sa <- TRUE # whether or not to run sensitivity analysis where we shift prior on alpha
 test <- FALSE # add a 'test' flag to run_id
 
 
@@ -27,13 +26,15 @@ source(here::here('code', 'utils.R'))
 # Coefficient equations corresponding to each model
 stan_mod_eqns <- list(
   'mod1' = '1',
-  'mod2' = 'sampling_quality + cases_min_age',
-  'mod2c' = 'sampling_quality + cases_min_age_categ',
-  'mod3' = 'sampling_quality + cases_min_age + surveillance_type',
-  'mod3c' = 'sampling_quality + cases_min_age_categ + surveillance_type'
+  'mod2' = 'sampling_quality + cases_min_age_bin',
+  'mod3' = 'sampling_quality + cases_min_age_bin + surveillance_type',
+  'mod4' = 'sampling_quality + surveillance_type'
 )
 stan_coef_eqn <- stan_mod_eqns[[stan_model]]
-stan_run_id <- paste0(stan_model, ifelse(!sa, '', '-sa'), '-d', se_sp_draws, '-', data_sub, ifelse(test, '-test', ''))
+stan_run_id <- paste0(stan_model, 
+                      ifelse(adjust_tests, '', '-unadj'),
+                      ifelse(sa, '-sa', ''),
+                      ifelse(test, '-test', ''))
 
 # use all cores
 options(mc.cores = parallel::detectCores())
@@ -91,42 +92,10 @@ df <- df %>%
   # surveillance is outbreak or non-outbreak
   mutate(surveillance_type = ifelse(surveillance_type == 'Outbreak surveillance',
                                     'Outbreak', 'Non-outbreak')) %>%
-  # categorical version of age variable
-  mutate(cases_min_age_categ = paste0('age', cases_min_age)) %>%
+  # binary version of age variable
+  mutate(cases_min_age_bin = ifelse(cases_min_age == 0, 0, 1)) %>%
   # remove incomplete extractions
   filter(!is.na(sampling_approach))
-
-
-### Sub-group analysis ----------------------------------------
-
-# subset, if applicable
-if (data_sub == 'outbreak') {
-  df <- df %>% filter(surveillance_type == 'Outbreak')
-}
-if (data_sub == 'non-outbreak') {
-  df <- df %>% filter(surveillance_type == 'Non-outbreak')
-}
-if (data_sub == 'high') {
-  df <- df %>% filter(sampling_quality == 'High')
-}
-if (data_sub == 'low') {
-  df <- df %>% filter(sampling_quality == 'Low')
-}
-if (data_sub == 'age0') {
-  df <- df %>% filter(cases_min_age == 0)
-}
-if (data_sub == 'age1') {
-  df <- df %>% filter(cases_min_age == 1)
-}
-if (data_sub == 'age2') {
-  df <- df %>% filter(cases_min_age == 2)
-}
-if (data_sub == 'age5') {
-  df <- df %>% filter(cases_min_age == 5)
-}
-if (! data_sub %in% c('full', 'outbreak', 'non-outbreak', 'age0', 'age1', 'age2', 'age5', 'high', 'low')) {
-  stop(data_sub, ' is not an option for sub-group analysis')
-}
 
 
 ### Prepare validation data for JAGS model ------------------
@@ -234,17 +203,16 @@ if (!file.exists(jags_est_file) | jags_redo) {
 
 print(jags_fit)
 
-# randomly select draws to run in stan
-selected_draws <- round(runif(se_sp_draws, 1, 4000))
-se_draws <- jags_fit$BUGSoutput$sims.list$mu_se[selected_draws, ]
-sp_draws <- jags_fit$BUGSoutput$sims.list$mu_sp[selected_draws, ]
+# draws of sensitivity and specificity
+se_draws <- jags_fit$BUGSoutput$sims.list$mu_se
+sp_draws <- jags_fit$BUGSoutput$sims.list$mu_sp
 colnames(se_draws) <- colnames(sp_draws) <- c('Culture', 'PCR', 'RDT')
 
 
 ### Prepare epi data for Stan model ------------------------
 
 # set covariates
-covs <- c('sampling_quality', 'cases_min_age', 'cases_min_age_categ', 'cases_dehydrated', # adjust for these
+covs <- c('sampling_quality', 'cases_min_age_bin', 'cases_dehydrated', # adjust for these
           'surveillance_type') # examine differences by these (and age categories in separate analysis)
 
 # positivity rates from meta-analysis primary dataset
@@ -262,24 +230,34 @@ test_dat <- sr_dat %>%
   reshape2::dcast(as.formula(paste0(paste0(c('study_id', 'country_iso3', 'region', covs),
                                            collapse = '+'),
                                     '~ diagnostic_test_type')),
-                  value.var = 'n_cases_tested', fill = 0)
+                  value.var = 'n_cases_tested', fill = NA)
 
 # cast number positive by test type
 pos_dat <- sr_dat %>%
   reshape2::dcast(as.formula(paste0(paste0(c('study_id', 'country_iso3', 'region', covs),
                                            collapse = '+'),
                                     '~ diagnostic_test_type')),
-                  value.var = 'n_cases_positive', fill = 0)
+                  value.var = 'n_cases_positive', fill = NA)
 
 # add random effect label by observation
 test_dat <- test_dat %>% mutate(study_lab = 1:nrow(test_dat))
 pos_dat <- pos_dat %>% mutate(study_lab = 1:nrow(test_dat))
 
-# add PCR column as 0's if we don't have any of this data by the sub-set
-if (!'PCR' %in% names(test_dat)) {
-  test_dat$PCR <- 0
-  pos_dat$PCR <- 0
-}
+# save covariate matrix
+dat_covs <- pos_dat
+
+# reshape long by test and remove NA
+test_dat <- reshape2::melt(test_dat, id.vars = c('study_id', 'study_lab', 'country_iso3', 'region', covs),
+                           variable.name = 'diagnostic_test_type', value.name = 'n_cases_tested') %>%
+  filter(!is.na(n_cases_tested)) %>%
+  mutate(test_id = ifelse(diagnostic_test_type == 'Culture', 1,
+                          ifelse(diagnostic_test_type == 'PCR', 2, 3)))
+
+pos_dat <- reshape2::melt(pos_dat, id.vars = c('study_id', 'study_lab', 'country_iso3', 'region', covs),
+                          variable.name = 'diagnostic_test_type', value.name = 'n_cases_positive') %>%
+  filter(!is.na(n_cases_positive)) %>%
+  mutate(test_id = ifelse(diagnostic_test_type == 'Culture', 1,
+                          ifelse(diagnostic_test_type == 'PCR', 2, 3)))
 
 
 ### Model with all data and covariates ------------------------
@@ -292,7 +270,13 @@ out_est_file <- here::here('data', 'generated_data', 'adjusted_positivity_rates'
                            paste0('posrate-', stan_run_id, '.rds'))
 
 # model script
-model_script <- ifelse(!sa, here::here('code', 'meta_analysis_re.stan'), here::here('code', 'meta_analysis_re_sa.stan'))
+model_script <- ifelse(adjust_tests, 
+                       here::here('code', 'meta_analysis_re.stan'),
+                       here::here('code', 'meta_analysis_re_unadj.stan'))
+
+model_script <- ifelse(sa, 
+                       here::here('code', 'meta_analysis_re_sa.stan'),
+                       model_script)
 
 # run model
 if (!file.exists(out_est_file) | stan_redo) {
@@ -300,13 +284,15 @@ if (!file.exists(out_est_file) | stan_redo) {
     model_script = model_script,
     dat_suspected = test_dat,
     dat_confirmed = pos_dat,
-    re_ids = test_dat$study_lab,
+    dat_covars = dat_covs,
+    re_ids = dat_covs$study_lab,
+    test_ids = test_dat$test_id,
     run_id = stan_run_id,
     coef_eqn = stan_coef_eqn,
     sens_draws = se_draws,
     spec_draws = sp_draws,
     redo = stan_redo,
-    inits_list = get_inits_list(stan_model) # note that I added this after the strong_prior and reparam tests were launched
+    adjust_tests = adjust_tests
   )
 
   saveRDS(posrate, out_est_file)
@@ -314,3 +300,14 @@ if (!file.exists(out_est_file) | stan_redo) {
 } else {
   posrate <- readRDS(out_est_file)
 }
+
+### Check model convergence and other diagnostics ------------------------------
+
+stan_out_file <- here::here("data", "generated_data", "model_fits", 
+                            paste0("stan_fit_", stan_run_id,".rds"))
+
+stan_est <- readRDS(stan_out_file)
+
+stan_est$cmdstan_diagnose()
+
+#shinystan::launch_shinystan(stan_est)
